@@ -2,16 +2,6 @@
 
 A production-grade Go gRPC order management service with an in-memory price-time priority matching engine, PostgreSQL persistence, and full observability.
 
-> Demonstrates: protobuf, all 4 gRPC streaming patterns, sqlc-generated repository layer, OpenTelemetry tracing, Prometheus metrics, structured concurrency, graceful shutdown, testcontainers integration tests, and CI.
-
----
-
-## Why
-
-Built as a portfolio piece targeting backend roles in fintech and trading infrastructure (payment processing, exchange backends, brokerage platforms). The order matching engine and streaming RPCs directly mirror the architecture of real-time trading systems, but the patterns transfer to any high-throughput domain.
-
-The goal is not to compete with a real exchange — it's to ship a small, complete, **honest** service that a senior engineer can read in 15 minutes and immediately trust.
-
 ## Architecture
 
 ```
@@ -78,20 +68,20 @@ The goal is not to compete with a real exchange — it's to ship a small, comple
 
 ## Tech Stack
 
-| Layer | Choice | Why |
+| Layer | Choice | Rationale |
 |---|---|---|
-| Language | Go 1.23+ | Primary CV language |
-| RPC | `google.golang.org/grpc` | Standard |
-| Proto | `buf` for lint + generation | Industry standard, schema enforcement |
-| Database | PostgreSQL 16 | What fintech shops use |
-| Query gen | `sqlc` | Type-safe, compiles, no runtime ORM overhead |
-| Migrations | `golang-migrate/migrate` | CLI + library, works in CI |
-| Observability | OpenTelemetry + Prometheus | What every target job asks about |
-| Logging | `log/slog` (stdlib) | No vendor lock-in |
-| Config | env vars + `envconfig` | 12-factor |
-| Testing | stdlib `testing` + `testcontainers-go` | Real Postgres in tests, no mocks |
-| Lint | `golangci-lint` | Standard |
-| CI | GitHub Actions | Matches the repo host |
+| Language | Go 1.23+ | First-class concurrency, fast compile, single static binary |
+| RPC | `google.golang.org/grpc` | HTTP/2 + protobuf, native streaming, strong Go ecosystem |
+| Proto | `buf` for lint + codegen | Schema linting, breaking-change detection, single-tool pipeline |
+| Database | PostgreSQL 16 | ACID transactions, mature replication, native `NUMERIC` for exact decimals |
+| Query gen | `sqlc` | Compile-time type checking, no runtime ORM overhead, plain SQL |
+| Migrations | `golang-migrate/migrate` | CLI + library, idempotent, integrates with CI |
+| Observability | OpenTelemetry + Prometheus | Vendor-neutral tracing, de-facto metrics standard |
+| Logging | `log/slog` (stdlib) | Structured logging in stdlib since 1.21, JSON output |
+| Config | env vars + `envconfig` | 12-factor, no config parsing on hot path |
+| Testing | stdlib `testing` + `testcontainers-go` | Real Postgres in CI, no mock drift |
+| Lint | `golangci-lint` | Aggregator for the standard Go linters |
+| CI | GitHub Actions | Native to the repo host |
 
 ## Project Structure
 
@@ -185,15 +175,7 @@ EOF
 
 ## Benchmarks
 
-Matching engine throughput, measured on Apple M2 / Go 1.23:
-
-| Scenario | Throughput | p99 Latency |
-|---|---|---|
-| Single-symbol, 10 concurrent submitters | TBD | TBD |
-| Multi-symbol (100 symbols), 100 concurrent | TBD | TBD |
-| Order book depth 10k, market order match | TBD | TBD |
-
-Run with `make bench`. Profiling via `go tool pprof`.
+Benchmark suite ships with the matching engine (`make bench`). Profiling via `go tool pprof`.
 
 ## Roadmap
 
