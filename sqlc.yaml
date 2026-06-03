@@ -1,0 +1,31 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "migrations/"
+    queries: "queries/"
+    gen:
+      go:
+        package: "repository"
+        out: "internal/repository"
+        sql_package: "pgx/v5"
+        overrides:
+          - column: "orders.price"
+            go_type:
+              import: "github.com/shopspring/decimal"
+              type: "Decimal"
+          - column: "orders.quantity"
+            go_type:
+              import: "github.com/shopspring/decimal"
+              type: "Decimal"
+          - column: "orders.filled_qty"
+            go_type:
+              import: "github.com/shopspring/decimal"
+              type: "Decimal"
+          - column: "trades.price"
+            go_type:
+              import: "github.com/shopspring/decimal"
+              type: "Decimal"
+          - column: "trades.quantity"
+            go_type:
+              import: "github.com/shopspring/decimal"
+              type: "Decimal"
