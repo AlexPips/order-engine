@@ -9,6 +9,7 @@ import (
 	"github.com/AlexPips/order-engine/internal/domain"
 	"github.com/AlexPips/order-engine/internal/events"
 	"github.com/AlexPips/order-engine/internal/matching"
+	"github.com/AlexPips/order-engine/internal/repository"
 	"github.com/shopspring/decimal"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -18,14 +19,16 @@ type OrderService struct {
 	orderpb.UnimplementedOrderServiceServer
 	engine *matching.Engine
 	bus    *events.Bus
+	repo   *repository.Queries
 	mu     sync.RWMutex
 	orders map[domain.OrderID]*domain.Order
 }
 
-func NewOrderService(engine *matching.Engine, bus *events.Bus) *OrderService {
+func NewOrderService(engine *matching.Engine, bus *events.Bus, repo *repository.Queries) *OrderService {
 	return &OrderService{
 		engine: engine,
 		bus:    bus,
+		repo:   repo,
 		orders: make(map[domain.OrderID]*domain.Order),
 	}
 }
@@ -47,7 +50,6 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrder
 		CreatedAt: time.Now().UnixNano(),
 		UpdatedAt: time.Now().UnixNano(),
 	}
-	// store before submit so the engine can reference it
 	s.mu.Lock()
 	s.orders[o.ID] = &o
 	s.mu.Unlock()
@@ -56,47 +58,159 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrder
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
+	s.mu.RLock()
+	stored := s.orders[o.ID]
+	s.mu.RUnlock()
+
+	params := domainToCreateParams(*stored)
+	if _, err := s.repo.CreateOrder(ctx, params); err != nil {
+		return nil, status.Errorf(codes.Internal, "persist order: %v", err)
+	}
+
 	for _, t := range trades {
 		s.bus.Publish("trade."+t.Symbol, events.TradeEvent{
 			Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
 			SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
 		})
+		if _, err := s.repo.CreateTrade(ctx, domainToTradeParams(t)); err != nil {
+			return nil, status.Errorf(codes.Internal, "persist trade: %v", err)
+		}
 	}
-	// refresh from map after engine mutated it
-	s.mu.RLock()
-	stored := s.orders[o.ID]
-	s.mu.RUnlock()
+
 	return &orderpb.CreateOrderResponse{Order: domainToProto(*stored)}, nil
 }
 
 func (s *OrderService) GetOrder(ctx context.Context, req *orderpb.GetOrderRequest) (*orderpb.GetOrderResponse, error) {
-	s.mu.RLock()
-	o, ok := s.orders[domain.OrderID(req.GetId())]
-	s.mu.RUnlock()
-	if !ok {
+	row, err := s.repo.GetOrder(ctx, req.GetId())
+	if err != nil {
 		return nil, status.Error(codes.NotFound, "order not found")
 	}
-	return &orderpb.GetOrderResponse{Order: domainToProto(*o)}, nil
+	return &orderpb.GetOrderResponse{Order: repoToOrderProto(row)}, nil
 }
 
 func (s *OrderService) CancelOrder(ctx context.Context, req *orderpb.CancelOrderRequest) (*orderpb.CancelOrderResponse, error) {
-	s.mu.Lock()
-	o, ok := s.orders[domain.OrderID(req.GetId())]
-	if !ok {
-		s.mu.Unlock()
+	row, err := s.repo.CancelOrder(ctx, repository.CancelOrderParams{
+		ID:        req.GetId(),
+		UpdatedAt: time.Now().UnixNano(),
+	})
+	if err != nil {
 		return nil, status.Error(codes.NotFound, "order not found")
 	}
-	o.Status = domain.OrderStatusCanceled
-	o.UpdatedAt = time.Now().UnixNano()
+	s.mu.Lock()
+	if o, ok := s.orders[domain.OrderID(row.ID)]; ok {
+		o.Status = domain.OrderStatusCanceled
+		o.UpdatedAt = row.UpdatedAt
+	}
 	s.mu.Unlock()
-	// remove from the order book
+
 	s.bus.Publish("order.cancel", events.OrderUpdateEvent{
-		OrderID: string(o.ID), Symbol: o.Symbol, Status: "CANCELED",
+		OrderID: row.ID, Symbol: row.Symbol, Status: "CANCELED",
 	})
-	return &orderpb.CancelOrderResponse{Order: domainToProto(*o)}, nil
+	return &orderpb.CancelOrderResponse{Order: repoToOrderProto(row)}, nil
 }
 
-// helpers remain the same as before
+func domainToCreateParams(o domain.Order) repository.CreateOrderParams {
+	return repository.CreateOrderParams{
+		ID:        string(o.ID),
+		UserID:    string(o.UserID),
+		Symbol:    o.Symbol,
+		Side:      sideToString(o.Side),
+		Type:      orderTypeToString(o.Type),
+		Price:     o.Price,
+		Quantity:  o.Quantity,
+		FilledQty: o.FilledQty,
+		Status:    statusToString(o.Status),
+		CreatedAt: o.CreatedAt,
+		UpdatedAt: o.UpdatedAt,
+	}
+}
+
+func domainToTradeParams(t domain.Trade) repository.CreateTradeParams {
+	return repository.CreateTradeParams{
+		ID:          string(t.ID),
+		Symbol:      t.Symbol,
+		BuyOrderID:  string(t.BuyOrderID),
+		SellOrderID: string(t.SellOrderID),
+		Price:       t.Price,
+		Quantity:    t.Quantity,
+		ExecutedAt:  t.ExecutedAt,
+	}
+}
+
+func repoToOrderProto(o repository.Order) *orderpb.Order {
+	return &orderpb.Order{
+		Id:                o.ID,
+		UserId:            o.UserID,
+		Symbol:            o.Symbol,
+		Side:              stringToSideProto(o.Side),
+		Type:              stringToTypeProto(o.Type),
+		Price:             decimalToProto(o.Price),
+		Quantity:          decimalToProto(o.Quantity),
+		FilledQuantity:    decimalToProto(o.FilledQty),
+		Status:            stringToStatusProto(o.Status),
+		CreatedAtUnixNano: o.CreatedAt,
+		UpdatedAtUnixNano: o.UpdatedAt,
+	}
+}
+
+func sideToString(s domain.Side) string {
+	if s == domain.SideSell {
+		return "SELL"
+	}
+	return "BUY"
+}
+
+func orderTypeToString(t domain.OrderType) string {
+	if t == domain.OrderTypeMarket {
+		return "MARKET"
+	}
+	return "LIMIT"
+}
+
+func statusToString(s domain.OrderStatus) string {
+	switch s {
+	case domain.OrderStatusPartial:
+		return "PARTIAL"
+	case domain.OrderStatusFilled:
+		return "FILLED"
+	case domain.OrderStatusCanceled:
+		return "CANCELED"
+	case domain.OrderStatusRejected:
+		return "REJECTED"
+	default:
+		return "NEW"
+	}
+}
+
+func stringToSideProto(s string) orderpb.Side {
+	if s == "SELL" {
+		return orderpb.Side_SIDE_SELL
+	}
+	return orderpb.Side_SIDE_BUY
+}
+
+func stringToTypeProto(t string) orderpb.OrderType {
+	if t == "MARKET" {
+		return orderpb.OrderType_ORDER_TYPE_MARKET
+	}
+	return orderpb.OrderType_ORDER_TYPE_LIMIT
+}
+
+func stringToStatusProto(s string) orderpb.OrderStatus {
+	switch s {
+	case "PARTIAL":
+		return orderpb.OrderStatus_ORDER_STATUS_PARTIAL
+	case "FILLED":
+		return orderpb.OrderStatus_ORDER_STATUS_FILLED
+	case "CANCELED":
+		return orderpb.OrderStatus_ORDER_STATUS_CANCELED
+	case "REJECTED":
+		return orderpb.OrderStatus_ORDER_STATUS_REJECTED
+	default:
+		return orderpb.OrderStatus_ORDER_STATUS_NEW
+	}
+}
+
 func protoToDomainSide(s orderpb.Side) domain.Side {
 	if s == orderpb.Side_SIDE_SELL {
 		return domain.SideSell
