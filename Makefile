@@ -22,6 +22,9 @@ test: ## Run all tests
 test-unit: ## Run unit tests only (exclude integration tests)
 	go test $$(shell go list ./... | grep -v /integration)
 
+test-integration: ## Run integration tests (requires Docker + migrate CLI)
+	go test -tags=integration -count=1 ./...
+
 bench: ## Run matching engine benchmarks
 	go test -bench=. -benchtime=1x ./internal/matching/
 
