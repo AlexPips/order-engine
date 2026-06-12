@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -51,6 +53,14 @@ func main() {
 	orderpb.RegisterOrderServiceServer(grpcServer, srv)
 	reflection.Register(grpcServer)
 
+	pprofServer := &http.Server{Addr: ":6060", Handler: nil}
+	go func() {
+		slog.Info("pprof listening", "addr", ":6060")
+		if err := pprofServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("pprof error", "error", err)
+		}
+	}()
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
@@ -64,5 +74,6 @@ func main() {
 	<-stop
 	slog.Info("shutting down")
 	grpcServer.GracefulStop()
+	pprofServer.Close()
 	pool.Close()
 }
