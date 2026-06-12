@@ -3,6 +3,7 @@ package matching
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/AlexPips/order-engine/internal/domain"
@@ -20,7 +21,7 @@ func New() *Engine {
 	return &Engine{books: make(map[string]*OrderBook)}
 }
 
-func (e *Engine) SubmitOrder(ctx context.Context, o domain.Order) ([]domain.Trade, error) {
+func (e *Engine) SubmitOrder(ctx context.Context, o *domain.Order) ([]domain.Trade, error) {
 	book := e.getOrCreateBook(o.Symbol)
 	switch o.Type {
 	case domain.OrderTypeMarket:
@@ -40,7 +41,7 @@ func (e *Engine) getOrCreateBook(symbol string) *OrderBook {
 	return e.books[symbol]
 }
 
-func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming domain.Order) ([]domain.Trade, error) {
+func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming *domain.Order) ([]domain.Trade, error) {
 	var trades []domain.Trade
 	remaining := incoming.Quantity
 
@@ -61,8 +62,8 @@ func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming domai
 		trades = append(trades, domain.Trade{
 			ID:          domain.TradeID(uuid.NewString()),
 			Symbol:      incoming.Symbol,
-			BuyOrderID:  orderIDForSide(domain.SideBuy, incoming, *cp),
-			SellOrderID: orderIDForSide(domain.SideSell, incoming, *cp),
+			BuyOrderID:  orderIDForSide(domain.SideBuy, incoming, cp),
+			SellOrderID: orderIDForSide(domain.SideSell, incoming, cp),
 			Price:       cp.Price,
 			Quantity:    fillQty,
 			ExecutedAt:  time.Now().UnixNano(),
@@ -70,7 +71,9 @@ func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming domai
 		remaining = remaining.Sub(fillQty)
 		cp.FilledQty = cp.FilledQty.Add(fillQty)
 		if cp.FilledQty.Equal(cp.Quantity) {
-			book.removeOrder(cp.ID)
+			if err := book.removeOrder(cp.ID); err != nil {
+				return nil, fmt.Errorf("remove filled order: %w", err)
+			}
 		}
 	}
 
@@ -83,7 +86,9 @@ func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming domai
 		default:
 			incoming.Status = domain.OrderStatusPartial
 		}
-		book.insertOrder(incoming)
+		if err := book.insertOrder(incoming); err != nil {
+			return nil, fmt.Errorf("insert resting order: %w", err)
+		}
 	} else {
 		incoming.FilledQty = incoming.Quantity
 		incoming.Status = domain.OrderStatusFilled
@@ -91,7 +96,7 @@ func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming domai
 	return trades, nil
 }
 
-func (e *Engine) matchMarket(ctx context.Context, book *OrderBook, incoming domain.Order) ([]domain.Trade, error) {
+func (e *Engine) matchMarket(ctx context.Context, book *OrderBook, incoming *domain.Order) ([]domain.Trade, error) {
 	if incoming.Side == domain.SideBuy {
 		incoming.Price = decimal.NewFromInt(1_000_000_000)
 	} else {
@@ -100,7 +105,7 @@ func (e *Engine) matchMarket(ctx context.Context, book *OrderBook, incoming doma
 	return e.matchLimit(ctx, book, incoming)
 }
 
-func orderIDForSide(side domain.Side, incoming, resting domain.Order) domain.OrderID {
+func orderIDForSide(side domain.Side, incoming, resting *domain.Order) domain.OrderID {
 	if incoming.Side == side {
 		return incoming.ID
 	}

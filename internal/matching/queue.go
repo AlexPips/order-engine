@@ -12,7 +12,7 @@ var (
 	ErrOrderNotFound  = errors.New("order not found")
 )
 
-func (ob *OrderBook) insertOrder(o domain.Order) error {
+func (ob *OrderBook) insertOrder(o *domain.Order) error {
 	if o.Type != domain.OrderTypeLimit {
 		return nil
 	}
@@ -29,16 +29,16 @@ func (ob *OrderBook) insertOrder(o domain.Order) error {
 	return nil
 }
 
-func insertIntoLevel(levels []PriceLevel, o domain.Order) []PriceLevel {
+func insertIntoLevel(levels []PriceLevel, o *domain.Order) []PriceLevel {
 	for i, lvl := range levels {
 		if o.Price.Equal(lvl.Price) {
-			levels[i].Orders = append(levels[i].Orders, o)
+			levels[i].Orders = append(levels[i].Orders, *o)
 			return levels
 		}
 	}
 	levels = append(levels, PriceLevel{
 		Price:  o.Price,
-		Orders: []domain.Order{o},
+		Orders: []domain.Order{*o},
 	})
 	sort.Slice(levels, func(i, j int) bool {
 		if o.Side == domain.SideBuy {
@@ -68,8 +68,8 @@ func (ob *OrderBook) removeOrder(id domain.OrderID) error {
 	defer ob.mu.Unlock()
 	for sideIdx, levels := range [][]PriceLevel{ob.bids, ob.asks} {
 		for lvlIdx := range levels {
-			for ordIdx, o := range levels[lvlIdx].Orders {
-				if o.ID == id {
+			for ordIdx := range levels[lvlIdx].Orders {
+				if levels[lvlIdx].Orders[ordIdx].ID == id {
 					lvl := &levels[lvlIdx]
 					lvl.Orders = append(lvl.Orders[:ordIdx], lvl.Orders[ordIdx+1:]...)
 					if len(lvl.Orders) == 0 {

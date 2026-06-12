@@ -26,10 +26,10 @@ func TestLimitBuyMatchesSell(t *testing.T) {
 	}
 
 	// Submit sell first (rests), then buy (matches).
-	if _, err := eng.SubmitOrder(ctx, sell); err != nil {
+	if _, err := eng.SubmitOrder(ctx, &sell); err != nil {
 		t.Fatal(err)
 	}
-	trades, err := eng.SubmitOrder(ctx, buy)
+	trades, err := eng.SubmitOrder(ctx, &buy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,8 +57,10 @@ func TestPartialFill(t *testing.T) {
 		Price: decimal.NewFromFloat(3000), Quantity: decimal.NewFromFloat(1),
 		Status: domain.OrderStatusNew,
 	}
-	eng.SubmitOrder(ctx, sell)
-	trades, err := eng.SubmitOrder(ctx, buy)
+	if _, err := eng.SubmitOrder(ctx, &sell); err != nil {
+		t.Fatal(err)
+	}
+	trades, err := eng.SubmitOrder(ctx, &buy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,8 +89,10 @@ func TestNoCrossLimit(t *testing.T) {
 		Price: decimal.NewFromFloat(50000), Quantity: decimal.NewFromFloat(1),
 		Status: domain.OrderStatusNew,
 	}
-	eng.SubmitOrder(ctx, sell)
-	trades, err := eng.SubmitOrder(ctx, buy)
+	if _, err := eng.SubmitOrder(ctx, &sell); err != nil {
+		t.Fatal(err)
+	}
+	trades, err := eng.SubmitOrder(ctx, &buy)
 	if err != nil {
 		t.Fatal(err)
 	}

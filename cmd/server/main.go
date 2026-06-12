@@ -33,12 +33,12 @@ func main() {
 		slog.Error("database", "error", err)
 		os.Exit(1)
 	}
-	defer pool.Close()
 	slog.Info("connected to database")
 
 	lis, err := net.Listen("tcp", ":"+cfg.GRPCPort)
 	if err != nil {
 		slog.Error("failed to listen", "port", cfg.GRPCPort, "error", err)
+		pool.Close()
 		os.Exit(1)
 	}
 
@@ -58,7 +58,6 @@ func main() {
 		slog.Info("server listening", "addr", lis.Addr())
 		if err := grpcServer.Serve(lis); err != nil {
 			slog.Error("server error", "error", err)
-			os.Exit(1)
 		}
 	}()
 

@@ -54,7 +54,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrder
 	s.orders[o.ID] = &o
 	s.mu.Unlock()
 
-	trades, err := s.engine.SubmitOrder(ctx, o)
+	trades, err := s.engine.SubmitOrder(ctx, &o)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -62,7 +62,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrder
 	stored := s.orders[o.ID]
 	s.mu.RUnlock()
 
-	params := domainToCreateParams(*stored)
+	params := domainToCreateParams(stored)
 	if _, err := s.repo.CreateOrder(ctx, params); err != nil {
 		return nil, status.Errorf(codes.Internal, "persist order: %v", err)
 	}
@@ -72,12 +72,12 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrder
 			Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
 			SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
 		})
-		if _, err := s.repo.CreateTrade(ctx, domainToTradeParams(t)); err != nil {
+		if _, err := s.repo.CreateTrade(ctx, domainToTradeParams(&t)); err != nil {
 			return nil, status.Errorf(codes.Internal, "persist trade: %v", err)
 		}
 	}
 
-	return &orderpb.CreateOrderResponse{Order: domainToProto(*stored)}, nil
+	return &orderpb.CreateOrderResponse{Order: domainToProto(stored)}, nil
 }
 
 func (s *OrderService) GetOrder(ctx context.Context, req *orderpb.GetOrderRequest) (*orderpb.GetOrderResponse, error) {
@@ -85,7 +85,7 @@ func (s *OrderService) GetOrder(ctx context.Context, req *orderpb.GetOrderReques
 	if err != nil {
 		return nil, status.Error(codes.NotFound, "order not found")
 	}
-	return &orderpb.GetOrderResponse{Order: repoToOrderProto(row)}, nil
+	return &orderpb.GetOrderResponse{Order: repoToOrderProto(&row)}, nil
 }
 
 func (s *OrderService) CancelOrder(ctx context.Context, req *orderpb.CancelOrderRequest) (*orderpb.CancelOrderResponse, error) {
@@ -106,10 +106,10 @@ func (s *OrderService) CancelOrder(ctx context.Context, req *orderpb.CancelOrder
 	s.bus.Publish("order.cancel", events.OrderUpdateEvent{
 		OrderID: row.ID, Symbol: row.Symbol, Status: "CANCELED",
 	})
-	return &orderpb.CancelOrderResponse{Order: repoToOrderProto(row)}, nil
+	return &orderpb.CancelOrderResponse{Order: repoToOrderProto(&row)}, nil
 }
 
-func domainToCreateParams(o domain.Order) repository.CreateOrderParams {
+func domainToCreateParams(o *domain.Order) repository.CreateOrderParams {
 	return repository.CreateOrderParams{
 		ID:        string(o.ID),
 		UserID:    string(o.UserID),
@@ -125,7 +125,7 @@ func domainToCreateParams(o domain.Order) repository.CreateOrderParams {
 	}
 }
 
-func domainToTradeParams(t domain.Trade) repository.CreateTradeParams {
+func domainToTradeParams(t *domain.Trade) repository.CreateTradeParams {
 	return repository.CreateTradeParams{
 		ID:          string(t.ID),
 		Symbol:      t.Symbol,
@@ -137,7 +137,7 @@ func domainToTradeParams(t domain.Trade) repository.CreateTradeParams {
 	}
 }
 
-func repoToOrderProto(o repository.Order) *orderpb.Order {
+func repoToOrderProto(o *repository.Order) *orderpb.Order {
 	return &orderpb.Order{
 		Id:                o.ID,
 		UserId:            o.UserID,
@@ -239,7 +239,7 @@ func decimalToProto(d decimal.Decimal) *orderpb.Decimal {
 	}
 }
 
-func domainToProto(o domain.Order) *orderpb.Order {
+func domainToProto(o *domain.Order) *orderpb.Order {
 	return &orderpb.Order{
 		Id:                string(o.ID),
 		UserId:            string(o.UserID),
@@ -281,20 +281,5 @@ func domainStatusToProto(s domain.OrderStatus) orderpb.OrderStatus {
 		return orderpb.OrderStatus_ORDER_STATUS_REJECTED
 	default:
 		return orderpb.OrderStatus_ORDER_STATUS_NEW
-	}
-}
-
-func pbStatusToDomain(s orderpb.OrderStatus) domain.OrderStatus {
-	switch s {
-	case orderpb.OrderStatus_ORDER_STATUS_PARTIAL:
-		return domain.OrderStatusPartial
-	case orderpb.OrderStatus_ORDER_STATUS_FILLED:
-		return domain.OrderStatusFilled
-	case orderpb.OrderStatus_ORDER_STATUS_CANCELED:
-		return domain.OrderStatusCanceled
-	case orderpb.OrderStatus_ORDER_STATUS_REJECTED:
-		return domain.OrderStatusRejected
-	default:
-		return domain.OrderStatusNew
 	}
 }
