@@ -12,8 +12,18 @@ type PriceLevel struct {
 	Orders []domain.Order
 }
 
-// OrderBook holds resting orders for one symbol.
-// Bids sorted high→low, asks sorted low→high.
+type SnapshotPriceLevel struct {
+	Price      decimal.Decimal
+	Quantity   decimal.Decimal
+	OrderCount int
+}
+
+type OrderBookSnapshot struct {
+	Symbol string
+	Bids   []SnapshotPriceLevel // sorted high→low
+	Asks   []SnapshotPriceLevel // sorted low→high
+}
+
 type OrderBook struct {
 	mu   sync.RWMutex
 	bids []PriceLevel

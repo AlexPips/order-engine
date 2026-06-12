@@ -109,6 +109,41 @@ func (s *OrderService) CancelOrder(ctx context.Context, req *orderpb.CancelOrder
 	return &orderpb.CancelOrderResponse{Order: repoToOrderProto(&row)}, nil
 }
 
+func (s *OrderService) GetOrderBook(ctx context.Context, req *orderpb.GetOrderBookRequest) (*orderpb.GetOrderBookResponse, error) {
+	symbol := req.GetSymbol()
+	if symbol == "" {
+		return nil, status.Error(codes.InvalidArgument, "symbol is required")
+	}
+
+	snap := s.engine.GetOrderBook(symbol)
+
+	bids := make([]*orderpb.PriceLevel, len(snap.Bids))
+	for i, b := range snap.Bids {
+		bids[i] = &orderpb.PriceLevel{
+			Price:      decimalToProto(b.Price),
+			Quantity:   decimalToProto(b.Quantity),
+			OrderCount: int32(b.OrderCount),
+		}
+	}
+
+	asks := make([]*orderpb.PriceLevel, len(snap.Asks))
+	for i, a := range snap.Asks {
+		asks[i] = &orderpb.PriceLevel{
+			Price:      decimalToProto(a.Price),
+			Quantity:   decimalToProto(a.Quantity),
+			OrderCount: int32(a.OrderCount),
+		}
+	}
+
+	return &orderpb.GetOrderBookResponse{
+		OrderBook: &orderpb.OrderBookSnapshot{
+			Symbol: symbol,
+			Bids:   bids,
+			Asks:   asks,
+		},
+	}, nil
+}
+
 func domainToCreateParams(o *domain.Order) repository.CreateOrderParams {
 	return repository.CreateOrderParams{
 		ID:        string(o.ID),

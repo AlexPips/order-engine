@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/AlexPips/order-engine/internal/domain"
+	"github.com/shopspring/decimal"
 )
 
 var (
@@ -103,4 +104,37 @@ func (ob *OrderBook) bestAsk() *domain.Order {
 		return nil
 	}
 	return &ob.asks[0].Orders[0]
+}
+
+func (ob *OrderBook) snapshot() OrderBookSnapshot {
+	ob.mu.RLock()
+	defer ob.mu.RUnlock()
+
+	bids := make([]SnapshotPriceLevel, len(ob.bids))
+	for i, lvl := range ob.bids {
+		var qty decimal.Decimal
+		for j := range lvl.Orders {
+			qty = qty.Add(lvl.Orders[j].Quantity.Sub(lvl.Orders[j].FilledQty))
+		}
+		bids[i] = SnapshotPriceLevel{
+			Price:      lvl.Price,
+			Quantity:   qty,
+			OrderCount: len(lvl.Orders),
+		}
+	}
+
+	asks := make([]SnapshotPriceLevel, len(ob.asks))
+	for i, lvl := range ob.asks {
+		var qty decimal.Decimal
+		for j := range lvl.Orders {
+			qty = qty.Add(lvl.Orders[j].Quantity.Sub(lvl.Orders[j].FilledQty))
+		}
+		asks[i] = SnapshotPriceLevel{
+			Price:      lvl.Price,
+			Quantity:   qty,
+			OrderCount: len(lvl.Orders),
+		}
+	}
+
+	return OrderBookSnapshot{Bids: bids, Asks: asks}
 }

@@ -41,6 +41,13 @@ func (e *Engine) getOrCreateBook(symbol string) *OrderBook {
 	return e.books[symbol]
 }
 
+func (e *Engine) GetOrderBook(symbol string) OrderBookSnapshot {
+	book := e.getOrCreateBook(symbol)
+	snap := book.snapshot()
+	snap.Symbol = symbol
+	return snap
+}
+
 func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming *domain.Order) ([]domain.Trade, error) {
 	var trades []domain.Trade
 	remaining := incoming.Quantity
