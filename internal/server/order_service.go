@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"io"
 	"sync"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/AlexPips/order-engine/internal/matching"
 	"github.com/AlexPips/order-engine/internal/repository"
 	"github.com/shopspring/decimal"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -142,6 +144,180 @@ func (s *OrderService) GetOrderBook(ctx context.Context, req *orderpb.GetOrderBo
 			Asks:   asks,
 		},
 	}, nil
+}
+
+func (s *OrderService) StreamOrderUpdates(req *orderpb.StreamOrderUpdatesRequest, stream grpc.ServerStreamingServer[orderpb.StreamOrderUpdatesResponse]) error {
+	topic := "order.update"
+	ch := s.bus.SubscribeChannel(topic, 64)
+	defer s.bus.UnsubscribeChannel(topic, ch)
+
+	for {
+		select {
+		case msg, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			ev, ok := msg.(events.OrderUpdateEvent)
+			if !ok {
+				continue
+			}
+			if !s.matchesFilter(req, ev) {
+				continue
+			}
+			row, err := s.repo.GetOrder(stream.Context(), ev.OrderID)
+			if err != nil {
+				continue
+			}
+			if err := stream.Send(&orderpb.StreamOrderUpdatesResponse{
+				Order: repoToOrderProto(&row),
+			}); err != nil {
+				return err
+			}
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		}
+	}
+}
+
+func (s *OrderService) matchesFilter(req *orderpb.StreamOrderUpdatesRequest, ev events.OrderUpdateEvent) bool {
+	switch f := req.GetFilter().(type) {
+	case *orderpb.StreamOrderUpdatesRequest_Symbol:
+		return ev.Symbol == f.Symbol
+	case *orderpb.StreamOrderUpdatesRequest_UserId:
+		row, err := s.repo.GetOrder(context.Background(), ev.OrderID)
+		if err != nil {
+			return false
+		}
+		return row.UserID == f.UserId
+	default:
+		return true
+	}
+}
+
+func (s *OrderService) BatchCreateOrders(stream grpc.ClientStreamingServer[orderpb.BatchCreateOrdersRequest, orderpb.BatchCreateOrdersResponse]) error {
+	var created []*orderpb.Order
+
+	for {
+		req, err := stream.Recv()
+		if err == io.EOF {
+			return stream.SendAndClose(&orderpb.BatchCreateOrdersResponse{Orders: created})
+		}
+		if err != nil {
+			return err
+		}
+
+		oid := domain.OrderID(req.GetOrder().GetIdempotencyKey())
+		if oid == "" {
+			continue
+		}
+		o := domain.Order{
+			ID:        oid,
+			UserID:    domain.UserID(req.GetOrder().GetUserId()),
+			Symbol:    req.GetOrder().GetSymbol(),
+			Side:      protoToDomainSide(req.GetOrder().GetSide()),
+			Type:      protoToDomainType(req.GetOrder().GetType()),
+			Price:     pbDecimalToDecimal(req.GetOrder().GetPrice()),
+			Quantity:  pbDecimalToDecimal(req.GetOrder().GetQuantity()),
+			Status:    domain.OrderStatusNew,
+			CreatedAt: time.Now().UnixNano(),
+			UpdatedAt: time.Now().UnixNano(),
+		}
+
+		trades, err := s.engine.SubmitOrder(stream.Context(), &o)
+		if err != nil {
+			continue
+		}
+
+		s.mu.Lock()
+		s.orders[o.ID] = &o
+		s.mu.Unlock()
+
+		params := domainToCreateParams(&o)
+		if _, err := s.repo.CreateOrder(stream.Context(), params); err != nil {
+			continue
+		}
+
+		for _, t := range trades {
+			s.bus.Publish("trade."+t.Symbol, events.TradeEvent{
+				Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
+				SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
+			})
+			if _, err := s.repo.CreateTrade(stream.Context(), domainToTradeParams(&t)); err != nil {
+				continue
+			}
+		}
+
+		created = append(created, domainToProto(&o))
+	}
+}
+
+func (s *OrderService) TradeFeed(stream grpc.BidiStreamingServer[orderpb.TradeFeedRequest, orderpb.TradeFeedResponse]) error {
+	tradeCh := s.bus.SubscribeChannel("trade.", 64)
+	defer s.bus.UnsubscribeChannel("trade.", tradeCh)
+
+	errc := make(chan error, 2)
+
+	go func() {
+		for {
+			req, err := stream.Recv()
+			if err != nil {
+				errc <- err
+				return
+			}
+			switch m := req.GetMsg().(type) {
+			case *orderpb.TradeFeedRequest_SubscribeSymbol:
+				s.bus.Subscribe("trade."+m.SubscribeSymbol, func(msg any) {
+				})
+			case *orderpb.TradeFeedRequest_NewOrder:
+				o := domain.Order{
+					ID:        domain.OrderID(m.NewOrder.GetIdempotencyKey()),
+					UserID:    domain.UserID(m.NewOrder.GetUserId()),
+					Symbol:    m.NewOrder.GetSymbol(),
+					Side:      protoToDomainSide(m.NewOrder.GetSide()),
+					Type:      protoToDomainType(m.NewOrder.GetType()),
+					Price:     pbDecimalToDecimal(m.NewOrder.GetPrice()),
+					Quantity:  pbDecimalToDecimal(m.NewOrder.GetQuantity()),
+					Status:    domain.OrderStatusNew,
+					CreatedAt: time.Now().UnixNano(),
+					UpdatedAt: time.Now().UnixNano(),
+				}
+				if _, err := s.engine.SubmitOrder(stream.Context(), &o); err != nil {
+					continue
+				}
+				s.mu.Lock()
+				s.orders[o.ID] = &o
+				s.mu.Unlock()
+				params := domainToCreateParams(&o)
+				s.repo.CreateOrder(stream.Context(), params) //nolint:errcheck
+			}
+		}
+	}()
+
+	go func() {
+		for msg := range tradeCh {
+			ev, ok := msg.(events.TradeEvent)
+			if !ok {
+				continue
+			}
+			if err := stream.Send(&orderpb.TradeFeedResponse{
+				Msg: &orderpb.TradeFeedResponse_Trade{
+					Trade: &orderpb.Trade{
+						Symbol:      ev.Symbol,
+						BuyOrderId:  ev.BuyID,
+						SellOrderId: ev.SellID,
+						Price:       stringToDecimalProto(ev.Price),
+						Quantity:    stringToDecimalProto(ev.Qty),
+					},
+				},
+			}); err != nil {
+				errc <- err
+				return
+			}
+		}
+		errc <- nil
+	}()
+
+	return <-errc
 }
 
 func domainToCreateParams(o *domain.Order) repository.CreateOrderParams {
@@ -288,6 +464,14 @@ func domainToProto(o *domain.Order) *orderpb.Order {
 		CreatedAtUnixNano: o.CreatedAt,
 		UpdatedAtUnixNano: o.UpdatedAt,
 	}
+}
+
+func stringToDecimalProto(s string) *orderpb.Decimal {
+	d, err := decimal.NewFromString(s)
+	if err != nil {
+		return decimalToProto(decimal.Zero)
+	}
+	return decimalToProto(d)
 }
 
 func domainSideToProto(s domain.Side) orderpb.Side {
