@@ -14,6 +14,7 @@ import (
 	"github.com/AlexPips/order-engine/internal/config"
 	"github.com/AlexPips/order-engine/internal/db"
 	"github.com/AlexPips/order-engine/internal/events"
+	"github.com/AlexPips/order-engine/internal/interceptors"
 	"github.com/AlexPips/order-engine/internal/matching"
 	"github.com/AlexPips/order-engine/internal/repository"
 	"github.com/AlexPips/order-engine/internal/server"
@@ -47,9 +48,24 @@ func main() {
 	engine := matching.New()
 	bus := events.New()
 	queries := repository.New(pool)
-	srv := server.NewOrderService(engine, bus, queries)
+	srv := server.NewOrderService(engine, bus, queries, pool)
 
-	grpcServer := grpc.NewServer()
+	if err := srv.RecoverState(ctx); err != nil {
+		slog.Error("state recovery failed", "error", err)
+	} else {
+		slog.Info("state recovery complete")
+	}
+
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(
+			interceptors.RecoveryUnary(),
+			interceptors.LoggingUnary(),
+		),
+		grpc.ChainStreamInterceptor(
+			interceptors.RecoveryStream(),
+			interceptors.LoggingStream(),
+		),
+	)
 	orderpb.RegisterOrderServiceServer(grpcServer, srv)
 	reflection.Register(grpcServer)
 

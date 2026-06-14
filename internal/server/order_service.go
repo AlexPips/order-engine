@@ -11,6 +11,7 @@ import (
 	"github.com/AlexPips/order-engine/internal/events"
 	"github.com/AlexPips/order-engine/internal/matching"
 	"github.com/AlexPips/order-engine/internal/repository"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -22,17 +23,48 @@ type OrderService struct {
 	engine *matching.Engine
 	bus    *events.Bus
 	repo   *repository.Queries
+	pool   *pgxpool.Pool
 	mu     sync.RWMutex
 	orders map[domain.OrderID]*domain.Order
 }
 
-func NewOrderService(engine *matching.Engine, bus *events.Bus, repo *repository.Queries) *OrderService {
+func NewOrderService(engine *matching.Engine, bus *events.Bus, repo *repository.Queries, pool *pgxpool.Pool) *OrderService {
 	return &OrderService{
 		engine: engine,
 		bus:    bus,
 		repo:   repo,
+		pool:   pool,
 		orders: make(map[domain.OrderID]*domain.Order),
 	}
+}
+
+func (s *OrderService) RecoverState(ctx context.Context) error {
+	dbOrders, err := s.repo.GetAllOpenOrders(ctx)
+	if err != nil {
+		return err
+	}
+
+	domainOrders := make([]domain.Order, 0, len(dbOrders))
+	for _, row := range dbOrders {
+		o := domain.Order{
+			ID:        domain.OrderID(row.ID),
+			UserID:    domain.UserID(row.UserID),
+			Symbol:    row.Symbol,
+			Side:      stringToDomainSide(row.Side),
+			Type:      stringToDomainType(row.Type),
+			Price:     row.Price,
+			Quantity:  row.Quantity,
+			FilledQty: row.FilledQty,
+			Status:    stringToDomainStatus(row.Status),
+			CreatedAt: row.CreatedAt,
+			UpdatedAt: row.UpdatedAt,
+		}
+		s.orders[o.ID] = &o
+		domainOrders = append(domainOrders, o)
+	}
+
+	s.engine.ReplayOrders(domainOrders)
+	return nil
 }
 
 func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrderRequest) (*orderpb.CreateOrderResponse, error) {
@@ -40,6 +72,15 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrder
 	if oid == "" {
 		return nil, status.Error(codes.InvalidArgument, "idempotency_key is required")
 	}
+
+	// Idempotency check: reject duplicate order IDs
+	s.mu.RLock()
+	if _, exists := s.orders[oid]; exists {
+		s.mu.RUnlock()
+		return nil, status.Errorf(codes.AlreadyExists, "order %s already exists", oid)
+	}
+	s.mu.RUnlock()
+
 	o := domain.Order{
 		ID:        oid,
 		UserID:    domain.UserID(req.GetUserId()),
@@ -52,20 +93,26 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrder
 		CreatedAt: time.Now().UnixNano(),
 		UpdatedAt: time.Now().UnixNano(),
 	}
-	s.mu.Lock()
-	s.orders[o.ID] = &o
-	s.mu.Unlock()
 
 	trades, err := s.engine.SubmitOrder(ctx, &o)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	s.mu.RLock()
-	stored := s.orders[o.ID]
-	s.mu.RUnlock()
 
-	params := domainToCreateParams(stored)
-	if _, err := s.repo.CreateOrder(ctx, params); err != nil {
+	s.mu.Lock()
+	s.orders[o.ID] = &o
+	s.mu.Unlock()
+
+	// Transactional DB writes: wrap order + trades in a single transaction
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "begin transaction: %v", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	txRepo := s.repo.WithTx(tx)
+	params := domainToCreateParams(&o)
+	if _, err := txRepo.CreateOrder(ctx, params); err != nil {
 		return nil, status.Errorf(codes.Internal, "persist order: %v", err)
 	}
 
@@ -74,12 +121,16 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrder
 			Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
 			SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
 		})
-		if _, err := s.repo.CreateTrade(ctx, domainToTradeParams(&t)); err != nil {
+		if _, err := txRepo.CreateTrade(ctx, domainToTradeParams(&t)); err != nil {
 			return nil, status.Errorf(codes.Internal, "persist trade: %v", err)
 		}
 	}
 
-	return &orderpb.CreateOrderResponse{Order: domainToProto(stored)}, nil
+	if err := tx.Commit(ctx); err != nil {
+		return nil, status.Errorf(codes.Internal, "commit transaction: %v", err)
+	}
+
+	return &orderpb.CreateOrderResponse{Order: domainToProto(&o)}, nil
 }
 
 func (s *OrderService) GetOrder(ctx context.Context, req *orderpb.GetOrderRequest) (*orderpb.GetOrderResponse, error) {
@@ -210,6 +261,15 @@ func (s *OrderService) BatchCreateOrders(stream grpc.ClientStreamingServer[order
 		if oid == "" {
 			continue
 		}
+
+		// Idempotency check: skip duplicate order IDs
+		s.mu.RLock()
+		if _, exists := s.orders[oid]; exists {
+			s.mu.RUnlock()
+			continue
+		}
+		s.mu.RUnlock()
+
 		o := domain.Order{
 			ID:        oid,
 			UserID:    domain.UserID(req.GetOrder().GetUserId()),
@@ -232,8 +292,18 @@ func (s *OrderService) BatchCreateOrders(stream grpc.ClientStreamingServer[order
 		s.orders[o.ID] = &o
 		s.mu.Unlock()
 
+		dbCtx := context.Background()
+
+		// Transactional DB writes: wrap order + trades in a single transaction
+		tx, err := s.pool.Begin(dbCtx)
+		if err != nil {
+			continue
+		}
+		defer tx.Rollback(dbCtx) //nolint:errcheck
+
+		txRepo := s.repo.WithTx(tx)
 		params := domainToCreateParams(&o)
-		if _, err := s.repo.CreateOrder(stream.Context(), params); err != nil {
+		if _, err := txRepo.CreateOrder(dbCtx, params); err != nil {
 			continue
 		}
 
@@ -242,9 +312,13 @@ func (s *OrderService) BatchCreateOrders(stream grpc.ClientStreamingServer[order
 				Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
 				SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
 			})
-			if _, err := s.repo.CreateTrade(stream.Context(), domainToTradeParams(&t)); err != nil {
+			if _, err := txRepo.CreateTrade(dbCtx, domainToTradeParams(&t)); err != nil {
 				continue
 			}
+		}
+
+		if err := tx.Commit(dbCtx); err != nil {
+			continue
 		}
 
 		created = append(created, domainToProto(&o))
@@ -252,10 +326,9 @@ func (s *OrderService) BatchCreateOrders(stream grpc.ClientStreamingServer[order
 }
 
 func (s *OrderService) TradeFeed(stream grpc.BidiStreamingServer[orderpb.TradeFeedRequest, orderpb.TradeFeedResponse]) error {
-	tradeCh := s.bus.SubscribeChannel("trade.", 64)
-	defer s.bus.UnsubscribeChannel("trade.", tradeCh)
-
 	errc := make(chan error, 2)
+	subscriptions := make(map[string]chan any)
+	var subMu sync.Mutex
 
 	go func() {
 		for {
@@ -266,58 +339,102 @@ func (s *OrderService) TradeFeed(stream grpc.BidiStreamingServer[orderpb.TradeFe
 			}
 			switch m := req.GetMsg().(type) {
 			case *orderpb.TradeFeedRequest_SubscribeSymbol:
-				s.bus.Subscribe("trade."+m.SubscribeSymbol, func(msg any) {
-				})
-			case *orderpb.TradeFeedRequest_NewOrder:
-				o := domain.Order{
-					ID:        domain.OrderID(m.NewOrder.GetIdempotencyKey()),
-					UserID:    domain.UserID(m.NewOrder.GetUserId()),
-					Symbol:    m.NewOrder.GetSymbol(),
-					Side:      protoToDomainSide(m.NewOrder.GetSide()),
-					Type:      protoToDomainType(m.NewOrder.GetType()),
-					Price:     pbDecimalToDecimal(m.NewOrder.GetPrice()),
-					Quantity:  pbDecimalToDecimal(m.NewOrder.GetQuantity()),
-					Status:    domain.OrderStatusNew,
-					CreatedAt: time.Now().UnixNano(),
-					UpdatedAt: time.Now().UnixNano(),
-				}
-				if _, err := s.engine.SubmitOrder(stream.Context(), &o); err != nil {
+				symbol := m.SubscribeSymbol
+				topic := "trade." + symbol
+
+				subMu.Lock()
+				if _, ok := subscriptions[symbol]; ok {
+					subMu.Unlock()
 					continue
 				}
-				s.mu.Lock()
-				s.orders[o.ID] = &o
-				s.mu.Unlock()
-				params := domainToCreateParams(&o)
-				s.repo.CreateOrder(stream.Context(), params) //nolint:errcheck
-			}
-		}
-	}()
+				ch := s.bus.SubscribeChannel(topic, 256)
+				subscriptions[symbol] = ch
+				subMu.Unlock()
 
-	go func() {
-		for msg := range tradeCh {
-			ev, ok := msg.(events.TradeEvent)
-			if !ok {
+				go func(sym string, tradeCh chan any) {
+					for msg := range tradeCh {
+						ev, ok := msg.(events.TradeEvent)
+						if !ok {
+							continue
+						}
+						if err := stream.Send(&orderpb.TradeFeedResponse{
+							Msg: &orderpb.TradeFeedResponse_Trade{
+								Trade: &orderpb.Trade{
+									Symbol:      ev.Symbol,
+									BuyOrderId:  ev.BuyID,
+									SellOrderId: ev.SellID,
+									Price:       stringToDecimalProto(ev.Price),
+									Quantity:    stringToDecimalProto(ev.Qty),
+								},
+							},
+						}); err != nil {
+							errc <- err
+							return
+						}
+					}
+				}(symbol, ch)
+
+		case *orderpb.TradeFeedRequest_NewOrder:
+			o := domain.Order{
+				ID:        domain.OrderID(m.NewOrder.GetIdempotencyKey()),
+				UserID:    domain.UserID(m.NewOrder.GetUserId()),
+				Symbol:    m.NewOrder.GetSymbol(),
+				Side:      protoToDomainSide(m.NewOrder.GetSide()),
+				Type:      protoToDomainType(m.NewOrder.GetType()),
+				Price:     pbDecimalToDecimal(m.NewOrder.GetPrice()),
+				Quantity:  pbDecimalToDecimal(m.NewOrder.GetQuantity()),
+				Status:    domain.OrderStatusNew,
+				CreatedAt: time.Now().UnixNano(),
+				UpdatedAt: time.Now().UnixNano(),
+			}
+
+			s.mu.Lock()
+			if _, exists := s.orders[o.ID]; exists {
+				s.mu.Unlock()
 				continue
 			}
-			if err := stream.Send(&orderpb.TradeFeedResponse{
-				Msg: &orderpb.TradeFeedResponse_Trade{
-					Trade: &orderpb.Trade{
-						Symbol:      ev.Symbol,
-						BuyOrderId:  ev.BuyID,
-						SellOrderId: ev.SellID,
-						Price:       stringToDecimalProto(ev.Price),
-						Quantity:    stringToDecimalProto(ev.Qty),
-					},
-				},
-			}); err != nil {
-				errc <- err
-				return
+			trades, err := s.engine.SubmitOrder(stream.Context(), &o)
+			if err != nil {
+				s.mu.Unlock()
+				continue
 			}
+			s.orders[o.ID] = &o
+			s.mu.Unlock()
+
+			dbCtx := context.Background()
+			tx, err := s.pool.Begin(dbCtx)
+			if err != nil {
+				continue
+			}
+			defer tx.Rollback(dbCtx) //nolint:errcheck
+
+			txRepo := s.repo.WithTx(tx)
+			params := domainToCreateParams(&o)
+			txRepo.CreateOrder(dbCtx, params) //nolint:errcheck
+
+			for _, t := range trades {
+				s.bus.Publish("trade."+t.Symbol, events.TradeEvent{
+					Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
+					SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
+				})
+				txRepo.CreateTrade(dbCtx, domainToTradeParams(&t)) //nolint:errcheck
+			}
+
+			tx.Commit(dbCtx) //nolint:errcheck
 		}
-		errc <- nil
+		}
 	}()
 
-	return <-errc
+	err := <-errc
+
+	subMu.Lock()
+	for symbol, ch := range subscriptions {
+		topic := "trade." + symbol
+		s.bus.UnsubscribeChannel(topic, ch)
+	}
+	subMu.Unlock()
+
+	return err
 }
 
 func domainToCreateParams(o *domain.Order) repository.CreateOrderParams {
@@ -472,6 +589,35 @@ func stringToDecimalProto(s string) *orderpb.Decimal {
 		return decimalToProto(decimal.Zero)
 	}
 	return decimalToProto(d)
+}
+
+func stringToDomainSide(s string) domain.Side {
+	if s == "SELL" {
+		return domain.SideSell
+	}
+	return domain.SideBuy
+}
+
+func stringToDomainType(s string) domain.OrderType {
+	if s == "MARKET" {
+		return domain.OrderTypeMarket
+	}
+	return domain.OrderTypeLimit
+}
+
+func stringToDomainStatus(s string) domain.OrderStatus {
+	switch s {
+	case "PARTIAL":
+		return domain.OrderStatusPartial
+	case "FILLED":
+		return domain.OrderStatusFilled
+	case "CANCELED":
+		return domain.OrderStatusCanceled
+	case "REJECTED":
+		return domain.OrderStatusRejected
+	default:
+		return domain.OrderStatusNew
+	}
 }
 
 func domainSideToProto(s domain.Side) orderpb.Side {

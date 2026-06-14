@@ -99,6 +99,44 @@ func (q *Queries) CreateOrder(ctx context.Context, arg CreateOrderParams) (Order
 	return i, err
 }
 
+const getAllOpenOrders = `-- name: GetAllOpenOrders :many
+SELECT id, user_id, symbol, side, type, price, quantity, filled_qty, status, created_at, updated_at FROM orders
+WHERE status IN ('NEW', 'PARTIAL')
+ORDER BY created_at ASC
+`
+
+func (q *Queries) GetAllOpenOrders(ctx context.Context) ([]Order, error) {
+	rows, err := q.db.Query(ctx, getAllOpenOrders)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Order
+	for rows.Next() {
+		var i Order
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Symbol,
+			&i.Side,
+			&i.Type,
+			&i.Price,
+			&i.Quantity,
+			&i.FilledQty,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getOpenOrdersBySymbol = `-- name: GetOpenOrdersBySymbol :many
 SELECT id, user_id, symbol, side, type, price, quantity, filled_qty, status, created_at, updated_at FROM orders
 WHERE symbol = $1 AND status IN ('NEW', 'PARTIAL')

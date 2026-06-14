@@ -22,3 +22,8 @@ RETURNING *;
 SELECT * FROM orders
 WHERE symbol = $1 AND status IN ('NEW', 'PARTIAL')
 ORDER BY created_at ASC;
+
+-- name: GetAllOpenOrders :many
+SELECT * FROM orders
+WHERE status IN ('NEW', 'PARTIAL')
+ORDER BY created_at ASC;

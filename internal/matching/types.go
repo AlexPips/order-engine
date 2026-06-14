@@ -25,7 +25,12 @@ type OrderBookSnapshot struct {
 }
 
 type OrderBook struct {
-	mu   sync.RWMutex
-	bids []PriceLevel
-	asks []PriceLevel
+	mu     sync.RWMutex
+	bids   []PriceLevel
+	asks   []PriceLevel
+	orders map[domain.OrderID]*domain.Order
+}
+
+func newOrderBook() *OrderBook {
+	return &OrderBook{orders: make(map[domain.OrderID]*domain.Order)}
 }

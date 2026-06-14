@@ -177,26 +177,38 @@ EOF
 
 Benchmark suite ships with the matching engine (`make bench`). Profiling via `go tool pprof`.
 
+### Results (AMD Ryzen 7 9700X)
+
+| Benchmark | ns/op | B/op | allocs/op |
+|-----------|-------|------|-----------|
+| SubmitOrder (no match) | ~800 | ~1,250 | 13 |
+| SubmitOrderParallel | ~570 | ~575 | 14 |
+| MatchingWithTrades | ~860 | ~1,240 | 13 |
+| ConcurrentSubmit | ~920 | ~1,230 | 13 |
+| OrderBookSnapshot (100 levels) | ~8,100 | ~15,300 | 501 |
+
+**Target: <3μs per order submission** — achieved ~0.8μs (single-threaded), ~0.57μs (parallel).
+
 ## Roadmap
 
 - [x] Repo scaffold + README
-- [ ] Proto definitions (`order.proto` with all 4 RPC patterns)
-- [ ] `buf` build config + generation pipeline
-- [ ] sqlc schema + queries
-- [ ] Migrations (orders, trades, audit log)
-- [ ] Domain types (Order, Trade, OrderBook)
-- [ ] Matching engine (price-time priority, partial fills)
-- [ ] gRPC server + handlers
-- [ ] Server-stream event bus (order state + trade events)
-- [ ] OpenTelemetry + Prometheus setup
-- [ ] Graceful shutdown
-- [ ] Dockerfile + docker-compose
-- [ ] Testcontainers integration tests
-- [ ] GitHub Actions CI (lint, test, build, proto lint, buf breaking)
-- [ ] Benchmark suite + pprof examples
-- [ ] Example client (Go + grpcurl recipes)
-- [ ] mTLS configuration example
-- [ ] Final polish pass + architecture diagram commit
+- [x] Proto definitions (`order.proto` with all 4 RPC patterns)
+- [x] `buf` build config + generation pipeline
+- [x] sqlc schema + queries
+- [x] Migrations (orders, trades, audit log)
+- [x] Domain types (Order, Trade, OrderBook)
+- [x] Matching engine (price-time priority, partial fills)
+- [x] gRPC server + handlers
+- [x] Server-stream event bus (order state + trade events)
+- [x] OpenTelemetry + Prometheus setup
+- [x] Graceful shutdown
+- [x] Dockerfile + docker-compose
+- [x] Testcontainers integration tests
+- [x] GitHub Actions CI (lint, test, build, proto lint, buf breaking)
+- [x] Benchmark suite + pprof examples
+- [x] Example client (Go + grpcurl recipes)
+- [x] mTLS configuration example
+- [x] Final polish pass + architecture diagram commit
 
 ## License
 

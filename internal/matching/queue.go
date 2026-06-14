@@ -19,9 +19,10 @@ func (ob *OrderBook) insertOrder(o *domain.Order) error {
 	}
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
-	if ob.findOrder(o.ID) != nil {
+	if _, exists := ob.orders[o.ID]; exists {
 		return ErrDuplicateOrder
 	}
+	ob.orders[o.ID] = o
 	if o.Side == domain.SideBuy {
 		ob.bids = insertIntoLevel(ob.bids, o)
 	} else {
@@ -37,55 +38,58 @@ func insertIntoLevel(levels []PriceLevel, o *domain.Order) []PriceLevel {
 			return levels
 		}
 	}
-	levels = append(levels, PriceLevel{
+
+	insertIdx := sort.Search(len(levels), func(i int) bool {
+		if o.Side == domain.SideBuy {
+			return levels[i].Price.LessThan(o.Price)
+		}
+		return levels[i].Price.GreaterThan(o.Price)
+	})
+
+	newLevel := PriceLevel{
 		Price:  o.Price,
 		Orders: []domain.Order{*o},
-	})
-	sort.Slice(levels, func(i, j int) bool {
-		if o.Side == domain.SideBuy {
-			return levels[i].Price.GreaterThan(levels[j].Price)
-		}
-		return levels[i].Price.LessThan(levels[j].Price)
-	})
+	}
+	levels = append(levels, PriceLevel{})
+	copy(levels[insertIdx+1:], levels[insertIdx:])
+	levels[insertIdx] = newLevel
+
 	return levels
 }
 
 func (ob *OrderBook) findOrder(id domain.OrderID) *domain.Order {
-	for _, levels := range [][]PriceLevel{ob.bids, ob.asks} {
-		for _, lvl := range levels {
-			for i := range lvl.Orders {
-				if lvl.Orders[i].ID == id {
-					return &lvl.Orders[i]
-				}
-			}
-		}
+	if o, exists := ob.orders[id]; exists {
+		return o
 	}
 	return nil
 }
 
-// removeOrder removes an order from the book. Called on cancel or full fill.
 func (ob *OrderBook) removeOrder(id domain.OrderID) error {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
-	for sideIdx, levels := range [][]PriceLevel{ob.bids, ob.asks} {
-		for lvlIdx := range levels {
-			for ordIdx := range levels[lvlIdx].Orders {
-				if levels[lvlIdx].Orders[ordIdx].ID == id {
-					lvl := &levels[lvlIdx]
-					lvl.Orders = append(lvl.Orders[:ordIdx], lvl.Orders[ordIdx+1:]...)
-					if len(lvl.Orders) == 0 {
-						if sideIdx == 0 {
-							ob.bids = append(ob.bids[:lvlIdx], ob.bids[lvlIdx+1:]...)
-						} else {
-							ob.asks = append(ob.asks[:lvlIdx], ob.asks[lvlIdx+1:]...)
-						}
-					}
-					return nil
+	o, exists := ob.orders[id]
+	if !exists {
+		return ErrOrderNotFound
+	}
+	delete(ob.orders, id)
+
+	levels := &ob.bids
+	if o.Side == domain.SideSell {
+		levels = &ob.asks
+	}
+	for lvlIdx := range *levels {
+		for ordIdx := range (*levels)[lvlIdx].Orders {
+			if (*levels)[lvlIdx].Orders[ordIdx].ID == id {
+				lvl := &(*levels)[lvlIdx]
+				lvl.Orders = append(lvl.Orders[:ordIdx], lvl.Orders[ordIdx+1:]...)
+				if len(lvl.Orders) == 0 {
+					*levels = append((*levels)[:lvlIdx], (*levels)[lvlIdx+1:]...)
 				}
+				return nil
 			}
 		}
 	}
-	return ErrOrderNotFound
+	return nil
 }
 
 func (ob *OrderBook) bestBid() *domain.Order {

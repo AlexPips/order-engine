@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/AlexPips/order-engine/internal/domain"
@@ -14,6 +15,7 @@ import (
 var ErrInsufficientLiquidity = errors.New("no matching orders available")
 
 type Engine struct {
+	mu    sync.RWMutex
 	books map[string]*OrderBook
 }
 
@@ -34,10 +36,21 @@ func (e *Engine) SubmitOrder(ctx context.Context, o *domain.Order) ([]domain.Tra
 }
 
 func (e *Engine) getOrCreateBook(symbol string) *OrderBook {
+	// Fast path: read lock
+	e.mu.RLock()
+	if b, ok := e.books[symbol]; ok {
+		e.mu.RUnlock()
+		return b
+	}
+	e.mu.RUnlock()
+
+	// Slow path: write lock with double-check
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if b, ok := e.books[symbol]; ok {
 		return b
 	}
-	e.books[symbol] = &OrderBook{}
+	e.books[symbol] = newOrderBook()
 	return e.books[symbol]
 }
 
@@ -46,6 +59,19 @@ func (e *Engine) GetOrderBook(symbol string) OrderBookSnapshot {
 	snap := book.snapshot()
 	snap.Symbol = symbol
 	return snap
+}
+
+func (e *Engine) ReplayOrders(orders []domain.Order) {
+	bySymbol := make(map[string][]domain.Order)
+	for _, o := range orders {
+		bySymbol[o.Symbol] = append(bySymbol[o.Symbol], o)
+	}
+	for symbol, symOrders := range bySymbol {
+		book := e.getOrCreateBook(symbol)
+		for i := range symOrders {
+			_ = book.insertOrder(&symOrders[i])
+		}
+	}
 }
 
 func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming *domain.Order) ([]domain.Trade, error) {
@@ -84,11 +110,11 @@ func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming *doma
 		}
 	}
 
+	filledQty := incoming.Quantity.Sub(remaining)
 	if remaining.GreaterThan(decimal.Zero) {
-		incoming.FilledQty = incoming.Quantity.Sub(remaining)
-		incoming.Quantity = remaining
+		incoming.FilledQty = filledQty
 		switch {
-		case incoming.FilledQty.IsZero():
+		case filledQty.IsZero():
 			incoming.Status = domain.OrderStatusNew
 		default:
 			incoming.Status = domain.OrderStatusPartial
