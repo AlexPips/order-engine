@@ -50,6 +50,11 @@ A production-grade Go gRPC order management service with an in-memory price-time
 - Trade event emission to subscribers
 - Thread-safe for concurrent submission (sync.RWMutex on the book, atomic counters)
 
+### Trading Logic
+- **Self-Trade Prevention (STP):** Orders from the same user are skipped during matching — an institution cannot trade with itself (MiFID II compliance).
+- **Market Order Slippage Protection:** `max_slippage_bps` on `CreateOrderRequest` caps fills at `bestPrice * (1 ± bps/10000)`. Prevents flash crashes from large market orders eating the entire book.
+- **Idempotency:** `idempotency_key` on `CreateOrderRequest` is used as the order ID. Retries with the same key return the original order or `AlreadyExists`, preventing duplicate order creation.
+
 ### Persistence
 - PostgreSQL with `sqlc` for type-safe queries
 - `golang-migrate` for schema versioning
