@@ -45,19 +45,19 @@ func (s *OrderService) RecoverState(ctx context.Context) error {
 	}
 
 	domainOrders := make([]domain.Order, 0, len(dbOrders))
-	for _, row := range dbOrders {
+	for i := range dbOrders {
 		o := domain.Order{
-			ID:        domain.OrderID(row.ID),
-			UserID:    domain.UserID(row.UserID),
-			Symbol:    row.Symbol,
-			Side:      stringToDomainSide(row.Side),
-			Type:      stringToDomainType(row.Type),
-			Price:     row.Price,
-			Quantity:  row.Quantity,
-			FilledQty: row.FilledQty,
-			Status:    stringToDomainStatus(row.Status),
-			CreatedAt: row.CreatedAt,
-			UpdatedAt: row.UpdatedAt,
+			ID:        domain.OrderID(dbOrders[i].ID),
+			UserID:    domain.UserID(dbOrders[i].UserID),
+			Symbol:    dbOrders[i].Symbol,
+			Side:      stringToDomainSide(dbOrders[i].Side),
+			Type:      stringToDomainType(dbOrders[i].Type),
+			Price:     dbOrders[i].Price,
+			Quantity:  dbOrders[i].Quantity,
+			FilledQty: dbOrders[i].FilledQty,
+			Status:    stringToDomainStatus(dbOrders[i].Status),
+			CreatedAt: dbOrders[i].CreatedAt,
+			UpdatedAt: dbOrders[i].UpdatedAt,
 		}
 		s.orders[o.ID] = &o
 		domainOrders = append(domainOrders, o)
@@ -65,6 +65,31 @@ func (s *OrderService) RecoverState(ctx context.Context) error {
 
 	s.engine.ReplayOrders(domainOrders)
 	return nil
+}
+
+func (s *OrderService) persistOrderTx(ctx context.Context, o *domain.Order, trades []domain.Trade) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	txRepo := s.repo.WithTx(tx)
+	if _, err := txRepo.CreateOrder(ctx, domainToCreateParams(o)); err != nil {
+		return err
+	}
+
+	for _, t := range trades {
+		s.bus.Publish("trade."+t.Symbol, events.TradeEvent{
+			Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
+			SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
+		})
+		if _, err := txRepo.CreateTrade(ctx, domainToTradeParams(&t)); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit(ctx)
 }
 
 func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrderRequest) (*orderpb.CreateOrderResponse, error) {
@@ -105,30 +130,8 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrder
 	s.mu.Unlock()
 
 	// Transactional DB writes: wrap order + trades in a single transaction
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "begin transaction: %v", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-
-	txRepo := s.repo.WithTx(tx)
-	params := domainToCreateParams(&o)
-	if _, err := txRepo.CreateOrder(ctx, params); err != nil {
+	if err := s.persistOrderTx(ctx, &o, trades); err != nil {
 		return nil, status.Errorf(codes.Internal, "persist order: %v", err)
-	}
-
-	for _, t := range trades {
-		s.bus.Publish("trade."+t.Symbol, events.TradeEvent{
-			Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
-			SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
-		})
-		if _, err := txRepo.CreateTrade(ctx, domainToTradeParams(&t)); err != nil {
-			return nil, status.Errorf(codes.Internal, "persist trade: %v", err)
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, status.Errorf(codes.Internal, "commit transaction: %v", err)
 	}
 
 	return &orderpb.CreateOrderResponse{Order: domainToProto(&o)}, nil
@@ -172,20 +175,20 @@ func (s *OrderService) GetOrderBook(ctx context.Context, req *orderpb.GetOrderBo
 	snap := s.engine.GetOrderBook(symbol)
 
 	bids := make([]*orderpb.PriceLevel, len(snap.Bids))
-	for i, b := range snap.Bids {
+	for i := range snap.Bids {
 		bids[i] = &orderpb.PriceLevel{
-			Price:      decimalToProto(b.Price),
-			Quantity:   decimalToProto(b.Quantity),
-			OrderCount: int32(b.OrderCount),
+			Price:      decimalToProto(snap.Bids[i].Price),
+			Quantity:   decimalToProto(snap.Bids[i].Quantity),
+			OrderCount: int32(snap.Bids[i].OrderCount), //nolint:gosec // G115: order book depth fits int32
 		}
 	}
 
 	asks := make([]*orderpb.PriceLevel, len(snap.Asks))
-	for i, a := range snap.Asks {
+	for i := range snap.Asks {
 		asks[i] = &orderpb.PriceLevel{
-			Price:      decimalToProto(a.Price),
-			Quantity:   decimalToProto(a.Quantity),
-			OrderCount: int32(a.OrderCount),
+			Price:      decimalToProto(snap.Asks[i].Price),
+			Quantity:   decimalToProto(snap.Asks[i].Quantity),
+			OrderCount: int32(snap.Asks[i].OrderCount), //nolint:gosec // G115: order book depth fits int32
 		}
 	}
 
@@ -294,32 +297,7 @@ func (s *OrderService) BatchCreateOrders(stream grpc.ClientStreamingServer[order
 		s.orders[o.ID] = &o
 		s.mu.Unlock()
 
-		dbCtx := context.Background()
-
-		// Transactional DB writes: wrap order + trades in a single transaction
-		tx, err := s.pool.Begin(dbCtx)
-		if err != nil {
-			continue
-		}
-		defer tx.Rollback(dbCtx) //nolint:errcheck
-
-		txRepo := s.repo.WithTx(tx)
-		params := domainToCreateParams(&o)
-		if _, err := txRepo.CreateOrder(dbCtx, params); err != nil {
-			continue
-		}
-
-		for _, t := range trades {
-			s.bus.Publish("trade."+t.Symbol, events.TradeEvent{
-				Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
-				SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
-			})
-			if _, err := txRepo.CreateTrade(dbCtx, domainToTradeParams(&t)); err != nil {
-				continue
-			}
-		}
-
-		if err := tx.Commit(dbCtx); err != nil {
+		if err := s.persistOrderTx(context.Background(), &o, trades); err != nil {
 			continue
 		}
 
@@ -404,26 +382,7 @@ func (s *OrderService) TradeFeed(stream grpc.BidiStreamingServer[orderpb.TradeFe
 				s.orders[o.ID] = &o
 				s.mu.Unlock()
 
-				dbCtx := context.Background()
-				tx, err := s.pool.Begin(dbCtx)
-				if err != nil {
-					continue
-				}
-				defer tx.Rollback(dbCtx) //nolint:errcheck
-
-				txRepo := s.repo.WithTx(tx)
-				params := domainToCreateParams(&o)
-				txRepo.CreateOrder(dbCtx, params) //nolint:errcheck
-
-				for _, t := range trades {
-					s.bus.Publish("trade."+t.Symbol, events.TradeEvent{
-						Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
-						SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
-					})
-					txRepo.CreateTrade(dbCtx, domainToTradeParams(&t)) //nolint:errcheck
-				}
-
-				tx.Commit(dbCtx) //nolint:errcheck
+				_ = s.persistOrderTx(context.Background(), &o, trades) //nolint:errcheck
 			}
 		}
 	}()

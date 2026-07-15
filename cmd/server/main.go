@@ -5,10 +5,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	_ "net/http/pprof"
+	_ "net/http/pprof" //nolint:gosec // G108: pprof intentionally exposed for dev profiling
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	orderpb "github.com/AlexPips/order-engine/gen/proto/order/v1"
 	"github.com/AlexPips/order-engine/internal/config"
@@ -69,7 +70,7 @@ func main() {
 	orderpb.RegisterOrderServiceServer(grpcServer, srv)
 	reflection.Register(grpcServer)
 
-	pprofServer := &http.Server{Addr: ":6060", Handler: nil}
+	pprofServer := &http.Server{Addr: ":6060", Handler: nil, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		slog.Info("pprof listening", "addr", ":6060")
 		if err := pprofServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {

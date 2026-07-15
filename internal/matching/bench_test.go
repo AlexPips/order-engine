@@ -26,7 +26,7 @@ func BenchmarkSubmitOrder(b *testing.B) {
 			Quantity: decimal.NewFromInt(1),
 			Status:   domain.OrderStatusNew,
 		}
-		engine.SubmitOrder(ctx, o)
+		engine.SubmitOrder(ctx, o) //nolint:errcheck
 	}
 }
 
@@ -48,7 +48,7 @@ func BenchmarkSubmitOrderParallel(b *testing.B) {
 				Quantity: decimal.NewFromInt(1),
 				Status:   domain.OrderStatusNew,
 			}
-			engine.SubmitOrder(ctx, o)
+			engine.SubmitOrder(ctx, o) //nolint:errcheck
 			i++
 		}
 	})
@@ -68,7 +68,7 @@ func BenchmarkMatchingWithTrades(b *testing.B) {
 		Quantity: decimal.NewFromInt(1000),
 		Status:   domain.OrderStatusNew,
 	}
-	engine.SubmitOrder(ctx, resting)
+	engine.SubmitOrder(ctx, resting) //nolint:errcheck
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -82,7 +82,7 @@ func BenchmarkMatchingWithTrades(b *testing.B) {
 			Quantity: decimal.NewFromInt(1),
 			Status:   domain.OrderStatusNew,
 		}
-		engine.SubmitOrder(ctx, o)
+		engine.SubmitOrder(ctx, o) //nolint:errcheck
 	}
 }
 
@@ -101,7 +101,7 @@ func BenchmarkOrderBookSnapshot(b *testing.B) {
 			Quantity: decimal.NewFromInt(1),
 			Status:   domain.OrderStatusNew,
 		}
-		engine.SubmitOrder(ctx, o)
+		engine.SubmitOrder(ctx, o) //nolint:errcheck
 	}
 
 	b.ResetTimer()
@@ -134,7 +134,7 @@ func BenchmarkConcurrentSubmit(b *testing.B) {
 				Quantity: decimal.NewFromInt(1),
 				Status:   domain.OrderStatusNew,
 			}
-			engine.SubmitOrder(ctx, o)
+			engine.SubmitOrder(ctx, o) //nolint:errcheck
 		}
 	})
 }

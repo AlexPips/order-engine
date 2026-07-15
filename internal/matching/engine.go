@@ -63,13 +63,13 @@ func (e *Engine) GetOrderBook(symbol string) OrderBookSnapshot {
 
 func (e *Engine) ReplayOrders(orders []domain.Order) {
 	bySymbol := make(map[string][]domain.Order)
-	for _, o := range orders {
-		bySymbol[o.Symbol] = append(bySymbol[o.Symbol], o)
+	for i := range orders {
+		bySymbol[orders[i].Symbol] = append(bySymbol[orders[i].Symbol], orders[i])
 	}
 	for symbol, symOrders := range bySymbol {
 		book := e.getOrCreateBook(symbol)
 		for i := range symOrders {
-			_ = book.insertOrder(&symOrders[i])
+			_ = book.insertOrder(&symOrders[i]) //nolint:errcheck
 		}
 	}
 }
