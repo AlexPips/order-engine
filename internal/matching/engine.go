@@ -29,7 +29,7 @@ func (e *Engine) SubmitOrder(ctx context.Context, o *domain.Order) ([]domain.Tra
 	case domain.OrderTypeMarket:
 		return e.matchMarket(ctx, book, o)
 	case domain.OrderTypeLimit:
-		return e.matchLimit(ctx, book, o)
+		return e.matchLimit(ctx, book, o, decimal.Zero)
 	default:
 		return nil, errors.New("unknown order type")
 	}
@@ -74,39 +74,45 @@ func (e *Engine) ReplayOrders(orders []domain.Order) {
 	}
 }
 
-func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming *domain.Order) ([]domain.Trade, error) {
+func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming *domain.Order, priceLimit decimal.Decimal) ([]domain.Trade, error) {
 	var trades []domain.Trade
 	remaining := incoming.Quantity
 
-	for remaining.GreaterThan(decimal.Zero) {
-		var cp *domain.Order
-		if incoming.Side == domain.SideBuy {
-			cp = book.bestAsk()
-			if cp == nil || cp.Price.GreaterThan(incoming.Price) {
+	if incoming.Side == domain.SideBuy {
+		for i := 0; i < len(book.asks) && remaining.GreaterThan(decimal.Zero); {
+			lvl := &book.asks[i]
+			if lvl.Price.GreaterThan(incoming.Price) {
 				break
 			}
-		} else {
-			cp = book.bestBid()
-			if cp == nil || cp.Price.LessThan(incoming.Price) {
+			if !priceLimit.IsZero() && lvl.Price.GreaterThan(priceLimit) {
 				break
 			}
+			before := len(lvl.Orders)
+			lvl.Orders = fillOrdersAtLevel(lvl.Orders, incoming, &remaining, &trades)
+			emptied := len(lvl.Orders) == 0 && before > 0
+			book.pruneEmptyLevels()
+			if emptied {
+				continue
+			}
+			i++
 		}
-		fillQty := decimal.Min(remaining, cp.Quantity.Sub(cp.FilledQty))
-		trades = append(trades, domain.Trade{
-			ID:          domain.TradeID(uuid.NewString()),
-			Symbol:      incoming.Symbol,
-			BuyOrderID:  orderIDForSide(domain.SideBuy, incoming, cp),
-			SellOrderID: orderIDForSide(domain.SideSell, incoming, cp),
-			Price:       cp.Price,
-			Quantity:    fillQty,
-			ExecutedAt:  time.Now().UnixNano(),
-		})
-		remaining = remaining.Sub(fillQty)
-		cp.FilledQty = cp.FilledQty.Add(fillQty)
-		if cp.FilledQty.Equal(cp.Quantity) {
-			if err := book.removeOrder(cp.ID); err != nil {
-				return nil, fmt.Errorf("remove filled order: %w", err)
+	} else {
+		for i := 0; i < len(book.bids) && remaining.GreaterThan(decimal.Zero); {
+			lvl := &book.bids[i]
+			if lvl.Price.LessThan(incoming.Price) {
+				break
 			}
+			if !priceLimit.IsZero() && lvl.Price.LessThan(priceLimit) {
+				break
+			}
+			before := len(lvl.Orders)
+			lvl.Orders = fillOrdersAtLevel(lvl.Orders, incoming, &remaining, &trades)
+			emptied := len(lvl.Orders) == 0 && before > 0
+			book.pruneEmptyLevels()
+			if emptied {
+				continue
+			}
+			i++
 		}
 	}
 
@@ -129,13 +135,67 @@ func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming *doma
 	return trades, nil
 }
 
-func (e *Engine) matchMarket(ctx context.Context, book *OrderBook, incoming *domain.Order) ([]domain.Trade, error) {
-	if incoming.Side == domain.SideBuy {
-		incoming.Price = decimal.NewFromInt(1_000_000_000)
-	} else {
-		incoming.Price = decimal.Zero
+func fillOrdersAtLevel(
+	orders []domain.Order,
+	incoming *domain.Order,
+	remaining *decimal.Decimal,
+	trades *[]domain.Trade,
+) []domain.Order {
+	for j := 0; j < len(orders) && remaining.GreaterThan(decimal.Zero); {
+		ro := &orders[j]
+		if incoming.UserID == ro.UserID {
+			j++
+			continue
+		}
+		fillQty := decimal.Min(*remaining, ro.Quantity.Sub(ro.FilledQty))
+		*trades = append(*trades, domain.Trade{
+			ID:          domain.TradeID(uuid.NewString()),
+			Symbol:      incoming.Symbol,
+			BuyOrderID:  orderIDForSide(domain.SideBuy, incoming, ro),
+			SellOrderID: orderIDForSide(domain.SideSell, incoming, ro),
+			Price:       ro.Price,
+			Quantity:    fillQty,
+			ExecutedAt:  time.Now().UnixNano(),
+		})
+		*remaining = remaining.Sub(fillQty)
+		ro.FilledQty = ro.FilledQty.Add(fillQty)
+		if ro.FilledQty.Equal(ro.Quantity) {
+			orders = append(orders[:j], orders[j+1:]...)
+			continue
+		}
+		j++
 	}
-	return e.matchLimit(ctx, book, incoming)
+	return orders
+}
+
+func (e *Engine) matchMarket(ctx context.Context, book *OrderBook, incoming *domain.Order) ([]domain.Trade, error) {
+	var priceLimit decimal.Decimal
+	if incoming.MaxSlippageBPS > 0 {
+		bps := decimal.NewFromInt(int64(incoming.MaxSlippageBPS))
+		factor := bps.Div(decimal.NewFromInt(10000))
+		if incoming.Side == domain.SideBuy {
+			best := book.bestAsk()
+			if best == nil {
+				return nil, ErrInsufficientLiquidity
+			}
+			priceLimit = best.Price.Mul(decimal.NewFromInt(1).Add(factor))
+			incoming.Price = priceLimit
+		} else {
+			best := book.bestBid()
+			if best == nil {
+				return nil, ErrInsufficientLiquidity
+			}
+			priceLimit = best.Price.Mul(decimal.NewFromInt(1).Sub(factor))
+			incoming.Price = priceLimit
+		}
+	} else {
+		if incoming.Side == domain.SideBuy {
+			incoming.Price = decimal.NewFromInt(1_000_000_000)
+		} else {
+			incoming.Price = decimal.Zero
+		}
+	}
+	return e.matchLimit(ctx, book, incoming, priceLimit)
 }
 
 func orderIDForSide(side domain.Side, incoming, resting *domain.Order) domain.OrderID {

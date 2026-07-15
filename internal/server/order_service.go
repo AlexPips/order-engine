@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	orderpb "github.com/AlexPips/order-engine/gen/order/v1"
+	orderpb "github.com/AlexPips/order-engine/gen/proto/order/v1"
 	"github.com/AlexPips/order-engine/internal/domain"
 	"github.com/AlexPips/order-engine/internal/events"
 	"github.com/AlexPips/order-engine/internal/matching"
@@ -82,16 +82,17 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrder
 	s.mu.RUnlock()
 
 	o := domain.Order{
-		ID:        oid,
-		UserID:    domain.UserID(req.GetUserId()),
-		Symbol:    req.GetSymbol(),
-		Side:      protoToDomainSide(req.GetSide()),
-		Type:      protoToDomainType(req.GetType()),
-		Price:     pbDecimalToDecimal(req.GetPrice()),
-		Quantity:  pbDecimalToDecimal(req.GetQuantity()),
-		Status:    domain.OrderStatusNew,
-		CreatedAt: time.Now().UnixNano(),
-		UpdatedAt: time.Now().UnixNano(),
+		ID:             oid,
+		UserID:         domain.UserID(req.GetUserId()),
+		Symbol:         req.GetSymbol(),
+		Side:           protoToDomainSide(req.GetSide()),
+		Type:           protoToDomainType(req.GetType()),
+		Price:          pbDecimalToDecimal(req.GetPrice()),
+		Quantity:       pbDecimalToDecimal(req.GetQuantity()),
+		Status:         domain.OrderStatusNew,
+		CreatedAt:      time.Now().UnixNano(),
+		UpdatedAt:      time.Now().UnixNano(),
+		MaxSlippageBPS: req.GetMaxSlippageBps(),
 	}
 
 	trades, err := s.engine.SubmitOrder(ctx, &o)
@@ -271,16 +272,17 @@ func (s *OrderService) BatchCreateOrders(stream grpc.ClientStreamingServer[order
 		s.mu.RUnlock()
 
 		o := domain.Order{
-			ID:        oid,
-			UserID:    domain.UserID(req.GetOrder().GetUserId()),
-			Symbol:    req.GetOrder().GetSymbol(),
-			Side:      protoToDomainSide(req.GetOrder().GetSide()),
-			Type:      protoToDomainType(req.GetOrder().GetType()),
-			Price:     pbDecimalToDecimal(req.GetOrder().GetPrice()),
-			Quantity:  pbDecimalToDecimal(req.GetOrder().GetQuantity()),
-			Status:    domain.OrderStatusNew,
-			CreatedAt: time.Now().UnixNano(),
-			UpdatedAt: time.Now().UnixNano(),
+			ID:             oid,
+			UserID:         domain.UserID(req.GetOrder().GetUserId()),
+			Symbol:         req.GetOrder().GetSymbol(),
+			Side:           protoToDomainSide(req.GetOrder().GetSide()),
+			Type:           protoToDomainType(req.GetOrder().GetType()),
+			Price:          pbDecimalToDecimal(req.GetOrder().GetPrice()),
+			Quantity:       pbDecimalToDecimal(req.GetOrder().GetQuantity()),
+			Status:         domain.OrderStatusNew,
+			CreatedAt:      time.Now().UnixNano(),
+			UpdatedAt:      time.Now().UnixNano(),
+			MaxSlippageBPS: req.GetOrder().GetMaxSlippageBps(),
 		}
 
 		trades, err := s.engine.SubmitOrder(stream.Context(), &o)
@@ -374,54 +376,55 @@ func (s *OrderService) TradeFeed(stream grpc.BidiStreamingServer[orderpb.TradeFe
 					}
 				}(symbol, ch)
 
-		case *orderpb.TradeFeedRequest_NewOrder:
-			o := domain.Order{
-				ID:        domain.OrderID(m.NewOrder.GetIdempotencyKey()),
-				UserID:    domain.UserID(m.NewOrder.GetUserId()),
-				Symbol:    m.NewOrder.GetSymbol(),
-				Side:      protoToDomainSide(m.NewOrder.GetSide()),
-				Type:      protoToDomainType(m.NewOrder.GetType()),
-				Price:     pbDecimalToDecimal(m.NewOrder.GetPrice()),
-				Quantity:  pbDecimalToDecimal(m.NewOrder.GetQuantity()),
-				Status:    domain.OrderStatusNew,
-				CreatedAt: time.Now().UnixNano(),
-				UpdatedAt: time.Now().UnixNano(),
-			}
+			case *orderpb.TradeFeedRequest_NewOrder:
+				o := domain.Order{
+					ID:             domain.OrderID(m.NewOrder.GetIdempotencyKey()),
+					UserID:         domain.UserID(m.NewOrder.GetUserId()),
+					Symbol:         m.NewOrder.GetSymbol(),
+					Side:           protoToDomainSide(m.NewOrder.GetSide()),
+					Type:           protoToDomainType(m.NewOrder.GetType()),
+					Price:          pbDecimalToDecimal(m.NewOrder.GetPrice()),
+					Quantity:       pbDecimalToDecimal(m.NewOrder.GetQuantity()),
+					Status:         domain.OrderStatusNew,
+					CreatedAt:      time.Now().UnixNano(),
+					UpdatedAt:      time.Now().UnixNano(),
+					MaxSlippageBPS: m.NewOrder.GetMaxSlippageBps(),
+				}
 
-			s.mu.Lock()
-			if _, exists := s.orders[o.ID]; exists {
+				s.mu.Lock()
+				if _, exists := s.orders[o.ID]; exists {
+					s.mu.Unlock()
+					continue
+				}
+				trades, err := s.engine.SubmitOrder(stream.Context(), &o)
+				if err != nil {
+					s.mu.Unlock()
+					continue
+				}
+				s.orders[o.ID] = &o
 				s.mu.Unlock()
-				continue
-			}
-			trades, err := s.engine.SubmitOrder(stream.Context(), &o)
-			if err != nil {
-				s.mu.Unlock()
-				continue
-			}
-			s.orders[o.ID] = &o
-			s.mu.Unlock()
 
-			dbCtx := context.Background()
-			tx, err := s.pool.Begin(dbCtx)
-			if err != nil {
-				continue
+				dbCtx := context.Background()
+				tx, err := s.pool.Begin(dbCtx)
+				if err != nil {
+					continue
+				}
+				defer tx.Rollback(dbCtx) //nolint:errcheck
+
+				txRepo := s.repo.WithTx(tx)
+				params := domainToCreateParams(&o)
+				txRepo.CreateOrder(dbCtx, params) //nolint:errcheck
+
+				for _, t := range trades {
+					s.bus.Publish("trade."+t.Symbol, events.TradeEvent{
+						Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
+						SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
+					})
+					txRepo.CreateTrade(dbCtx, domainToTradeParams(&t)) //nolint:errcheck
+				}
+
+				tx.Commit(dbCtx) //nolint:errcheck
 			}
-			defer tx.Rollback(dbCtx) //nolint:errcheck
-
-			txRepo := s.repo.WithTx(tx)
-			params := domainToCreateParams(&o)
-			txRepo.CreateOrder(dbCtx, params) //nolint:errcheck
-
-			for _, t := range trades {
-				s.bus.Publish("trade."+t.Symbol, events.TradeEvent{
-					Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
-					SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
-				})
-				txRepo.CreateTrade(dbCtx, domainToTradeParams(&t)) //nolint:errcheck
-			}
-
-			tx.Commit(dbCtx) //nolint:errcheck
-		}
 		}
 	}()
 

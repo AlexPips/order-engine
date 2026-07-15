@@ -27,15 +27,16 @@ const (
 )
 
 type Order struct {
-	ID        OrderID
-	UserID    UserID
-	Symbol    string
-	Side      Side
-	Type      OrderType
-	Price     decimal.Decimal
-	Quantity  decimal.Decimal
-	FilledQty decimal.Decimal
-	Status    OrderStatus
-	CreatedAt int64
-	UpdatedAt int64
+	ID             OrderID
+	UserID         UserID
+	Symbol         string
+	Side           Side
+	Type           OrderType
+	Price          decimal.Decimal
+	Quantity       decimal.Decimal
+	FilledQty      decimal.Decimal
+	Status         OrderStatus
+	CreatedAt      int64
+	UpdatedAt      int64
+	MaxSlippageBPS uint32
 }

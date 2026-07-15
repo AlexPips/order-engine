@@ -10,7 +10,6 @@ import (
 
 var (
 	ErrDuplicateOrder = errors.New("order already exists")
-	ErrOrderNotFound  = errors.New("order not found")
 )
 
 func (ob *OrderBook) insertOrder(o *domain.Order) error {
@@ -55,41 +54,6 @@ func insertIntoLevel(levels []PriceLevel, o *domain.Order) []PriceLevel {
 	levels[insertIdx] = newLevel
 
 	return levels
-}
-
-func (ob *OrderBook) findOrder(id domain.OrderID) *domain.Order {
-	if o, exists := ob.orders[id]; exists {
-		return o
-	}
-	return nil
-}
-
-func (ob *OrderBook) removeOrder(id domain.OrderID) error {
-	ob.mu.Lock()
-	defer ob.mu.Unlock()
-	o, exists := ob.orders[id]
-	if !exists {
-		return ErrOrderNotFound
-	}
-	delete(ob.orders, id)
-
-	levels := &ob.bids
-	if o.Side == domain.SideSell {
-		levels = &ob.asks
-	}
-	for lvlIdx := range *levels {
-		for ordIdx := range (*levels)[lvlIdx].Orders {
-			if (*levels)[lvlIdx].Orders[ordIdx].ID == id {
-				lvl := &(*levels)[lvlIdx]
-				lvl.Orders = append(lvl.Orders[:ordIdx], lvl.Orders[ordIdx+1:]...)
-				if len(lvl.Orders) == 0 {
-					*levels = append((*levels)[:lvlIdx], (*levels)[lvlIdx+1:]...)
-				}
-				return nil
-			}
-		}
-	}
-	return nil
 }
 
 func (ob *OrderBook) bestBid() *domain.Order {
@@ -141,4 +105,20 @@ func (ob *OrderBook) snapshot() OrderBookSnapshot {
 	}
 
 	return OrderBookSnapshot{Bids: bids, Asks: asks}
+}
+
+func (ob *OrderBook) pruneEmptyLevels() {
+	ob.bids = pruneLevels(ob.bids)
+	ob.asks = pruneLevels(ob.asks)
+}
+
+func pruneLevels(levels []PriceLevel) []PriceLevel {
+	n := 0
+	for _, lvl := range levels {
+		if len(lvl.Orders) > 0 {
+			levels[n] = lvl
+			n++
+		}
+	}
+	return levels[:n]
 }

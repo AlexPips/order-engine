@@ -10,7 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	orderpb "github.com/AlexPips/order-engine/gen/order/v1"
+	orderpb "github.com/AlexPips/order-engine/gen/proto/order/v1"
 	"github.com/AlexPips/order-engine/internal/config"
 	"github.com/AlexPips/order-engine/internal/db"
 	"github.com/AlexPips/order-engine/internal/events"

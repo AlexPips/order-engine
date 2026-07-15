@@ -75,6 +75,7 @@ message CreateOrderRequest {
   Decimal price = 5;
   Decimal quantity = 6;
   string idempotency_key = 7;
+  uint32 max_slippage_bps = 8;
 }
 message CreateOrderResponse { Order order = 1; }
 
