@@ -75,7 +75,7 @@ A production-grade Go gRPC order management service with an in-memory price-time
 
 | Layer | Choice | Rationale |
 |---|---|---|
-| Language | Go 1.23+ | First-class concurrency, fast compile, single static binary |
+| Language | Go 1.26+ | First-class concurrency, fast compile, single static binary |
 | RPC | `google.golang.org/grpc` | HTTP/2 + protobuf, native streaming, strong Go ecosystem |
 | Proto | `buf` for lint + codegen | Schema linting, breaking-change detection, single-tool pipeline |
 | Database | PostgreSQL 16 | ACID transactions, mature replication, native `NUMERIC` for exact decimals |
@@ -117,7 +117,7 @@ order-engine/
 ## Quick Start
 
 ### Prerequisites
-- Go 1.23+
+- Go 1.26+
 - Docker + docker-compose
 - `buf` (proto tooling) — `go install github.com/bufbuild/buf/cmd/buf@latest`
 - `protoc-gen-go` + `protoc-gen-go-grpc` — `go install google.golang.org/protobuf/cmd/protoc-gen-go@latest google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest`

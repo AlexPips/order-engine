@@ -1,6 +1,6 @@
 module github.com/AlexPips/order-engine
 
-go 1.26.3
+go 1.26
 
 require (
 	github.com/google/uuid v1.6.0
