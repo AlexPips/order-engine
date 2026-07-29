@@ -33,7 +33,7 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
       - run: buf generate
-      - run: go test -coverprofile=coverage.out ./...
+      - run: go test -race -coverprofile=coverage.out ./...
       - run: go tool cover -func=coverage.out | tail -1
 
   build:
