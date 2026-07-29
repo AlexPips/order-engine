@@ -60,10 +60,12 @@ func main() {
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
 			interceptors.RecoveryUnary(),
+			interceptors.RequestIDUnary(),
 			interceptors.LoggingUnary(),
 		),
 		grpc.ChainStreamInterceptor(
 			interceptors.RecoveryStream(),
+			interceptors.RequestIDStream(),
 			interceptors.LoggingStream(),
 		),
 	)
