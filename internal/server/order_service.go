@@ -314,9 +314,11 @@ func (s *OrderService) BatchCreateOrders(stream grpc.ClientStreamingServer[order
 }
 
 func (s *OrderService) TradeFeed(stream grpc.BidiStreamingServer[orderpb.TradeFeedRequest, orderpb.TradeFeedResponse]) error {
+	ctx := stream.Context()
 	errc := make(chan error, 2)
 	subscriptions := make(map[string]chan any)
 	var subMu sync.Mutex
+	var wg sync.WaitGroup
 
 	go func() {
 		for {
@@ -339,24 +341,33 @@ func (s *OrderService) TradeFeed(stream grpc.BidiStreamingServer[orderpb.TradeFe
 				subscriptions[symbol] = ch
 				subMu.Unlock()
 
+				wg.Add(1)
 				go func(sym string, tradeCh chan any) {
-					for msg := range tradeCh {
-						ev, ok := msg.(events.TradeEvent)
-						if !ok {
-							continue
-						}
-						if err := stream.Send(&orderpb.TradeFeedResponse{
-							Msg: &orderpb.TradeFeedResponse_Trade{
-								Trade: &orderpb.Trade{
-									Symbol:      ev.Symbol,
-									BuyOrderId:  ev.BuyID,
-									SellOrderId: ev.SellID,
-									Price:       stringToDecimalProto(ev.Price),
-									Quantity:    stringToDecimalProto(ev.Qty),
+					defer wg.Done()
+					for {
+						select {
+						case msg, ok := <-tradeCh:
+							if !ok {
+								return
+							}
+							ev, ok := msg.(events.TradeEvent)
+							if !ok {
+								continue
+							}
+							if err := stream.Send(&orderpb.TradeFeedResponse{
+								Msg: &orderpb.TradeFeedResponse_Trade{
+									Trade: &orderpb.Trade{
+										Symbol:      ev.Symbol,
+										BuyOrderId:  ev.BuyID,
+										SellOrderId: ev.SellID,
+										Price:       stringToDecimalProto(ev.Price),
+										Quantity:    stringToDecimalProto(ev.Qty),
+									},
 								},
-							},
-						}); err != nil {
-							errc <- err
+							}); err != nil {
+								return
+							}
+						case <-ctx.Done():
 							return
 						}
 					}
@@ -382,7 +393,7 @@ func (s *OrderService) TradeFeed(stream grpc.BidiStreamingServer[orderpb.TradeFe
 					s.mu.Unlock()
 					continue
 				}
-				trades, err := s.engine.SubmitOrder(stream.Context(), &o)
+				trades, err := s.engine.SubmitOrder(ctx, &o)
 				if err != nil {
 					s.mu.Unlock()
 					continue
@@ -395,8 +406,10 @@ func (s *OrderService) TradeFeed(stream grpc.BidiStreamingServer[orderpb.TradeFe
 		}
 	}()
 
-	err := <-errc
+	// Block until Recv goroutine signals (client disconnect or error)
+	recvErr := <-errc
 
+	// Cancel all sender goroutines
 	subMu.Lock()
 	for symbol, ch := range subscriptions {
 		topic := "trade." + symbol
@@ -404,7 +417,10 @@ func (s *OrderService) TradeFeed(stream grpc.BidiStreamingServer[orderpb.TradeFe
 	}
 	subMu.Unlock()
 
-	return err
+	// Wait for all sender goroutines to exit
+	wg.Wait()
+
+	return recvErr
 }
 
 func domainToCreateParams(o *domain.Order) repository.CreateOrderParams {
