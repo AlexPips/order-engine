@@ -13,23 +13,26 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace"
 )
 
-const otelSchemaURL = "https://opentelemetry.io/schemas/1.31.0"
-
 // InitTracerProvider creates and configures an OTel TracerProvider with OTLP
 // gRPC export. Caller must call tp.Shutdown(ctx) on graceful shutdown.
 func InitTracerProvider(ctx context.Context, serviceName, serviceVersion string) (*trace.TracerProvider, error) {
+	// Endpoint matches docker-compose jaeger service.
+	// Override via OTEL_EXPORTER_OTLP_ENDPOINT env var at runtime.
+	endpoint := "jaeger:4317"
 	exporter, err := otlptracegrpc.New(ctx,
-		otlptracegrpc.WithEndpoint("otel-collector:4317"),
+		otlptracegrpc.WithEndpoint(endpoint),
 		otlptracegrpc.WithInsecure(),
 	)
 	if err != nil {
 		return nil, err
 	}
 
+	// Use Default's schema URL so resource.Merge doesn't conflict.
+	def := resource.Default()
 	res, err := resource.Merge(
-		resource.Default(),
+		def,
 		resource.NewWithAttributes(
-			otelSchemaURL,
+			def.SchemaURL(),
 			attribute.String("service.name", serviceName),
 			attribute.String("service.version", serviceVersion),
 			attribute.String("telemetry.sdk.language", "go"),
