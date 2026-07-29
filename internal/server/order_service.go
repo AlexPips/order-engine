@@ -80,16 +80,24 @@ func (s *OrderService) persistOrderTx(ctx context.Context, o *domain.Order, trad
 	}
 
 	for _, t := range trades {
-		s.bus.Publish("trade."+t.Symbol, events.TradeEvent{
-			Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
-			SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
-		})
 		if _, err := txRepo.CreateTrade(ctx, domainToTradeParams(&t)); err != nil {
 			return err
 		}
 	}
 
-	return tx.Commit(ctx)
+	// Commit first, then publish — no phantom events on rollback
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+
+	for _, t := range trades {
+		s.bus.Publish("trade."+t.Symbol, events.TradeEvent{
+			Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
+			SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
+		})
+	}
+
+	return nil
 }
 
 func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrderRequest) (*orderpb.CreateOrderResponse, error) {
