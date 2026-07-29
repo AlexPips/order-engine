@@ -48,6 +48,8 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
       - run: buf generate
+      - name: Install migrate CLI
+        run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
       - run: go test -tags=integration -race -count=1 -timeout 180s ./internal/repository/...
 
   build:

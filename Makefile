@@ -1,4 +1,4 @@
-.PHONY: help build run test test-unit bench vet tidy clean
+.PHONY: help build run test test-unit bench vet vulncheck pre-push tidy clean
 
 help: ## List all targets
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -32,6 +32,13 @@ bench: ## Run matching engine benchmarks
 
 vet: ## Run go vet
 	go vet ./...
+
+vulncheck: ## Run govulncheck (install: go install golang.org/x/vuln/cmd/govulncheck@latest)
+	@if ! command -v govulncheck >/dev/null 2>&1; then \
+		echo "ERROR: govulncheck not installed. Run: go install golang.org/x/vuln/cmd/govulncheck@latest"; \
+		exit 1; \
+	fi
+	govulncheck ./...
 
 tidy: ## Tidy module dependencies
 	go mod tidy
@@ -100,6 +107,11 @@ docker-up: ## Start Postgres + service
 
 docker-down: ## Stop stack
 	docker compose -f deployments/docker-compose.yml down
+
+## --- Pre-Push ---
+
+pre-push: test vet vulncheck lint ## Run all checks before pushing (test + vet + vulncheck + lint)
+	@echo "✓ all pre-push checks passed"
 
 ## --- Coverage ---
 
