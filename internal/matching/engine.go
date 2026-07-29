@@ -10,7 +10,12 @@ import (
 	"github.com/AlexPips/order-engine/internal/domain"
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+var tracer = otel.Tracer("internal/matching/engine")
 
 var ErrInsufficientLiquidity = errors.New("no matching orders available")
 
@@ -24,6 +29,18 @@ func New() *Engine {
 }
 
 func (e *Engine) SubmitOrder(ctx context.Context, o *domain.Order) ([]domain.Trade, error) {
+	ctx, span := tracer.Start(ctx, "Engine.SubmitOrder",
+		trace.WithAttributes(
+			attribute.String("order.id", string(o.ID)),
+			attribute.String("order.symbol", o.Symbol),
+			attribute.String("order.side", o.Side.String()),
+			attribute.String("order.type", o.Type.String()),
+			attribute.String("order.price", o.Price.String()),
+			attribute.String("order.quantity", o.Quantity.String()),
+		),
+	)
+	defer span.End()
+
 	book := e.getOrCreateBook(o.Symbol)
 	switch o.Type {
 	case domain.OrderTypeMarket:
@@ -31,7 +48,10 @@ func (e *Engine) SubmitOrder(ctx context.Context, o *domain.Order) ([]domain.Tra
 	case domain.OrderTypeLimit:
 		return e.matchLimit(ctx, book, o, decimal.Zero)
 	default:
-		return nil, errors.New("unknown order type")
+		err := errors.New("unknown order type")
+		span.RecordError(err)
+		span.SetAttributes(attribute.Bool("error", true))
+		return nil, err
 	}
 }
 
@@ -196,6 +216,28 @@ func (e *Engine) matchMarket(ctx context.Context, book *OrderBook, incoming *dom
 		}
 	}
 	return e.matchLimit(ctx, book, incoming, priceLimit)
+}
+
+func (e *Engine) BookSymbols() []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	symbols := make([]string, 0, len(e.books))
+	for sym := range e.books {
+		symbols = append(symbols, sym)
+	}
+	return symbols
+}
+
+func (e *Engine) BookDepth(symbol string) int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	book, ok := e.books[symbol]
+	if !ok {
+		return 0
+	}
+	book.mu.RLock()
+	defer book.mu.RUnlock()
+	return len(book.bids) + len(book.asks)
 }
 
 func orderIDForSide(side domain.Side, incoming, resting *domain.Order) domain.OrderID {

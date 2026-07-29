@@ -19,6 +19,9 @@ import (
 	"github.com/AlexPips/order-engine/internal/matching"
 	"github.com/AlexPips/order-engine/internal/repository"
 	"github.com/AlexPips/order-engine/internal/server"
+	"github.com/AlexPips/order-engine/internal/telemetry"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
@@ -46,10 +49,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	tp, err := telemetry.InitTracerProvider(ctx, "order-engine", "0.1.0")
+	if err != nil {
+		slog.Warn("OTel tracer init failed (tracing disabled)", "error", err)
+	} else {
+		slog.Info("OTel tracer provider initialized")
+	}
+
 	engine := matching.New()
 	bus := events.New()
 	queries := repository.New(pool)
-	srv := server.NewOrderService(engine, bus, queries, pool)
+	metrics := telemetry.NewMetrics()
+	health := telemetry.NewHealth(pool)
+	srv := server.NewOrderService(engine, bus, queries, pool, metrics)
 
 	if err := srv.RecoverState(ctx); err != nil {
 		slog.Error("state recovery failed", "error", err)
@@ -58,28 +70,53 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.ChainUnaryInterceptor(
 			interceptors.RecoveryUnary(),
+			interceptors.RequestIDUnary(),
 			interceptors.LoggingUnary(),
 		),
 		grpc.ChainStreamInterceptor(
 			interceptors.RecoveryStream(),
+			interceptors.RequestIDStream(),
 			interceptors.LoggingStream(),
 		),
 	)
 	orderpb.RegisterOrderServiceServer(grpcServer, srv)
 	reflection.Register(grpcServer)
 
-	pprofServer := &http.Server{Addr: ":6060", Handler: nil, ReadHeaderTimeout: 10 * time.Second}
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	// Metrics + health + pprof on :6060
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/healthz", health.LivenessHandler)
+	mux.HandleFunc("/ready", health.ReadinessHandler)
+
+	metricsServer := &http.Server{Addr: ":6060", Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
-		slog.Info("pprof listening", "addr", ":6060")
-		if err := pprofServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("pprof error", "error", err)
+		slog.Info("metrics+health listening", "addr", ":6060")
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("metrics server error", "error", err)
 		}
 	}()
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	// Update book depth metrics every 5 seconds
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				for _, sym := range engine.BookSymbols() {
+					metrics.BookDepth.WithLabelValues(sym).Set(float64(engine.BookDepth(sym)))
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
 
 	go func() {
 		slog.Info("server listening", "addr", lis.Addr())
@@ -91,6 +128,9 @@ func main() {
 	<-stop
 	slog.Info("shutting down")
 	grpcServer.GracefulStop()
-	pprofServer.Close()
+	metricsServer.Close()
 	pool.Close()
+	if tp != nil {
+		telemetry.ShutdownTracerProvider(context.Background(), tp)
+	}
 }

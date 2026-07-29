@@ -11,6 +11,7 @@ import (
 	"github.com/AlexPips/order-engine/internal/events"
 	"github.com/AlexPips/order-engine/internal/matching"
 	"github.com/AlexPips/order-engine/internal/repository"
+	"github.com/AlexPips/order-engine/internal/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 	"google.golang.org/grpc"
@@ -20,21 +21,23 @@ import (
 
 type OrderService struct {
 	orderpb.UnimplementedOrderServiceServer
-	engine *matching.Engine
-	bus    *events.Bus
-	repo   *repository.Queries
-	pool   *pgxpool.Pool
-	mu     sync.RWMutex
-	orders map[domain.OrderID]*domain.Order
+	engine  *matching.Engine
+	bus     *events.Bus
+	repo    *repository.Queries
+	pool    *pgxpool.Pool
+	metrics *telemetry.Metrics
+	mu      sync.RWMutex
+	orders  map[domain.OrderID]*domain.Order
 }
 
-func NewOrderService(engine *matching.Engine, bus *events.Bus, repo *repository.Queries, pool *pgxpool.Pool) *OrderService {
+func NewOrderService(engine *matching.Engine, bus *events.Bus, repo *repository.Queries, pool *pgxpool.Pool, metrics *telemetry.Metrics) *OrderService {
 	return &OrderService{
-		engine: engine,
-		bus:    bus,
-		repo:   repo,
-		pool:   pool,
-		orders: make(map[domain.OrderID]*domain.Order),
+		engine:  engine,
+		bus:     bus,
+		repo:    repo,
+		pool:    pool,
+		metrics: metrics,
+		orders:  make(map[domain.OrderID]*domain.Order),
 	}
 }
 
@@ -80,16 +83,24 @@ func (s *OrderService) persistOrderTx(ctx context.Context, o *domain.Order, trad
 	}
 
 	for _, t := range trades {
-		s.bus.Publish("trade."+t.Symbol, events.TradeEvent{
-			Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
-			SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
-		})
 		if _, err := txRepo.CreateTrade(ctx, domainToTradeParams(&t)); err != nil {
 			return err
 		}
 	}
 
-	return tx.Commit(ctx)
+	// Commit first, then publish — no phantom events on rollback
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+
+	for _, t := range trades {
+		s.bus.Publish("trade."+t.Symbol, events.TradeEvent{
+			Symbol: t.Symbol, BuyID: string(t.BuyOrderID),
+			SellID: string(t.SellOrderID), Price: t.Price.String(), Qty: t.Quantity.String(),
+		})
+	}
+
+	return nil
 }
 
 func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrderRequest) (*orderpb.CreateOrderResponse, error) {
@@ -120,9 +131,16 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrder
 		MaxSlippageBPS: req.GetMaxSlippageBps(),
 	}
 
+	s.metrics.OrdersReceived.Inc()
+	start := time.Now()
 	trades, err := s.engine.SubmitOrder(ctx, &o)
+	s.metrics.OrderLatency.Observe(time.Since(start).Seconds())
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
+	}
+	s.metrics.OrdersSubmitted.Inc()
+	if len(trades) > 0 {
+		s.metrics.TradesExecuted.Add(float64(len(trades)))
 	}
 
 	s.mu.Lock()
@@ -306,9 +324,11 @@ func (s *OrderService) BatchCreateOrders(stream grpc.ClientStreamingServer[order
 }
 
 func (s *OrderService) TradeFeed(stream grpc.BidiStreamingServer[orderpb.TradeFeedRequest, orderpb.TradeFeedResponse]) error {
+	ctx := stream.Context()
 	errc := make(chan error, 2)
 	subscriptions := make(map[string]chan any)
 	var subMu sync.Mutex
+	var wg sync.WaitGroup
 
 	go func() {
 		for {
@@ -331,24 +351,33 @@ func (s *OrderService) TradeFeed(stream grpc.BidiStreamingServer[orderpb.TradeFe
 				subscriptions[symbol] = ch
 				subMu.Unlock()
 
+				wg.Add(1)
 				go func(sym string, tradeCh chan any) {
-					for msg := range tradeCh {
-						ev, ok := msg.(events.TradeEvent)
-						if !ok {
-							continue
-						}
-						if err := stream.Send(&orderpb.TradeFeedResponse{
-							Msg: &orderpb.TradeFeedResponse_Trade{
-								Trade: &orderpb.Trade{
-									Symbol:      ev.Symbol,
-									BuyOrderId:  ev.BuyID,
-									SellOrderId: ev.SellID,
-									Price:       stringToDecimalProto(ev.Price),
-									Quantity:    stringToDecimalProto(ev.Qty),
+					defer wg.Done()
+					for {
+						select {
+						case msg, ok := <-tradeCh:
+							if !ok {
+								return
+							}
+							ev, ok := msg.(events.TradeEvent)
+							if !ok {
+								continue
+							}
+							if err := stream.Send(&orderpb.TradeFeedResponse{
+								Msg: &orderpb.TradeFeedResponse_Trade{
+									Trade: &orderpb.Trade{
+										Symbol:      ev.Symbol,
+										BuyOrderId:  ev.BuyID,
+										SellOrderId: ev.SellID,
+										Price:       stringToDecimalProto(ev.Price),
+										Quantity:    stringToDecimalProto(ev.Qty),
+									},
 								},
-							},
-						}); err != nil {
-							errc <- err
+							}); err != nil {
+								return
+							}
+						case <-ctx.Done():
 							return
 						}
 					}
@@ -374,7 +403,7 @@ func (s *OrderService) TradeFeed(stream grpc.BidiStreamingServer[orderpb.TradeFe
 					s.mu.Unlock()
 					continue
 				}
-				trades, err := s.engine.SubmitOrder(stream.Context(), &o)
+				trades, err := s.engine.SubmitOrder(ctx, &o)
 				if err != nil {
 					s.mu.Unlock()
 					continue
@@ -387,8 +416,10 @@ func (s *OrderService) TradeFeed(stream grpc.BidiStreamingServer[orderpb.TradeFe
 		}
 	}()
 
-	err := <-errc
+	// Block until Recv goroutine signals (client disconnect or error)
+	recvErr := <-errc
 
+	// Cancel all sender goroutines
 	subMu.Lock()
 	for symbol, ch := range subscriptions {
 		topic := "trade." + symbol
@@ -396,7 +427,10 @@ func (s *OrderService) TradeFeed(stream grpc.BidiStreamingServer[orderpb.TradeFe
 	}
 	subMu.Unlock()
 
-	return err
+	// Wait for all sender goroutines to exit
+	wg.Wait()
+
+	return recvErr
 }
 
 func domainToCreateParams(o *domain.Order) repository.CreateOrderParams {

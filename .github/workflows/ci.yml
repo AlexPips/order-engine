@@ -33,12 +33,28 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
       - run: buf generate
-      - run: go test -coverprofile=coverage.out ./...
+      - run: go test -race -coverprofile=coverage.out ./...
       - run: go tool cover -func=coverage.out | tail -1
+
+  integration:
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - run: buf generate
+      - name: Install migrate CLI
+        run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+      - run: go test -tags=integration -race -count=1 -timeout 180s ./internal/repository/...
 
   build:
     runs-on: ubuntu-latest
-    needs: [lint, test]
+    needs: [lint, test, integration]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

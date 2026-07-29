@@ -12,5 +12,5 @@ CREATE TABLE IF NOT EXISTS orders (
     updated_at BIGINT NOT NULL
 );
 
-CREATE INDEX idx_orders_symbol_created ON orders (symbol, created_at);
-CREATE INDEX idx_orders_user_id ON orders (user_id);
+CREATE INDEX IF NOT EXISTS idx_orders_symbol_created ON orders (symbol, created_at);
+CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders (user_id);
