@@ -21,6 +21,7 @@ import (
 	"github.com/AlexPips/order-engine/internal/server"
 	"github.com/AlexPips/order-engine/internal/telemetry"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
@@ -48,6 +49,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	tp, err := telemetry.InitTracerProvider(ctx, "order-engine", "0.1.0")
+	if err != nil {
+		slog.Warn("OTel tracer init failed (tracing disabled)", "error", err)
+	} else {
+		slog.Info("OTel tracer provider initialized")
+	}
+
 	engine := matching.New()
 	bus := events.New()
 	queries := repository.New(pool)
@@ -62,6 +70,7 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.ChainUnaryInterceptor(
 			interceptors.RecoveryUnary(),
 			interceptors.RequestIDUnary(),
@@ -121,4 +130,7 @@ func main() {
 	grpcServer.GracefulStop()
 	metricsServer.Close()
 	pool.Close()
+	if tp != nil {
+		telemetry.ShutdownTracerProvider(context.Background(), tp)
+	}
 }

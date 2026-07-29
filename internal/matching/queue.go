@@ -31,13 +31,8 @@ func (ob *OrderBook) insertOrder(o *domain.Order) error {
 }
 
 func insertIntoLevel(levels []PriceLevel, o *domain.Order) []PriceLevel {
-	for i, lvl := range levels {
-		if o.Price.Equal(lvl.Price) {
-			levels[i].Orders = append(levels[i].Orders, *o)
-			return levels
-		}
-	}
-
+	// Binary search finds insertion index in one pass (O(log n)).
+	// Bids are sorted high→low, asks low→high.
 	insertIdx := sort.Search(len(levels), func(i int) bool {
 		if o.Side == domain.SideBuy {
 			return levels[i].Price.LessThan(o.Price)
@@ -45,6 +40,15 @@ func insertIntoLevel(levels []PriceLevel, o *domain.Order) []PriceLevel {
 		return levels[i].Price.GreaterThan(o.Price)
 	})
 
+	// Price level exists at insertIdx-1 (sort.Search returns the first index
+	// where the predicate is true, which is past any equal-price level since
+	// LessThan/GreaterThan are both false for equal decimals).
+	if insertIdx > 0 && levels[insertIdx-1].Price.Equal(o.Price) {
+		levels[insertIdx-1].Orders = append(levels[insertIdx-1].Orders, *o)
+		return levels
+	}
+
+	// New price level — insert at insertIdx (shifts elements, O(n)).
 	newLevel := PriceLevel{
 		Price:  o.Price,
 		Orders: []domain.Order{*o},

@@ -20,7 +20,7 @@ func NewHealth(pool *pgxpool.Pool) *Health {
 // LivenessHandler always returns 200. Use for k8s liveness probes.
 func (h *Health) LivenessHandler(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
+	_, _ = w.Write([]byte("ok")) //nolint:errcheck
 }
 
 // ReadinessHandler pings the DB. Returns 200 if healthy, 503 otherwise.
@@ -34,7 +34,7 @@ func (h *Health) ReadinessHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
+	_, _ = w.Write([]byte("ok")) //nolint:errcheck
 }
 
 // Ready returns true if the database is reachable. Used for programmatic checks.

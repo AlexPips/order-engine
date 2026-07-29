@@ -9,12 +9,34 @@ const (
 	SideSell
 )
 
+func (s Side) String() string {
+	switch s {
+	case SideBuy:
+		return "BUY"
+	case SideSell:
+		return "SELL"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 type OrderType int
 
 const (
 	OrderTypeLimit OrderType = iota
 	OrderTypeMarket
 )
+
+func (t OrderType) String() string {
+	switch t {
+	case OrderTypeLimit:
+		return "LIMIT"
+	case OrderTypeMarket:
+		return "MARKET"
+	default:
+		return "UNKNOWN"
+	}
+}
 
 type OrderStatus int
 
@@ -25,6 +47,23 @@ const (
 	OrderStatusCanceled
 	OrderStatusRejected
 )
+
+func (s OrderStatus) String() string {
+	switch s {
+	case OrderStatusNew:
+		return "NEW"
+	case OrderStatusPartial:
+		return "PARTIAL"
+	case OrderStatusFilled:
+		return "FILLED"
+	case OrderStatusCanceled:
+		return "CANCELED"
+	case OrderStatusRejected:
+		return "REJECTED"
+	default:
+		return "UNKNOWN"
+	}
+}
 
 type Order struct {
 	ID             OrderID
