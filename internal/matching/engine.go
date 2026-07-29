@@ -198,6 +198,28 @@ func (e *Engine) matchMarket(ctx context.Context, book *OrderBook, incoming *dom
 	return e.matchLimit(ctx, book, incoming, priceLimit)
 }
 
+func (e *Engine) BookSymbols() []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	symbols := make([]string, 0, len(e.books))
+	for sym := range e.books {
+		symbols = append(symbols, sym)
+	}
+	return symbols
+}
+
+func (e *Engine) BookDepth(symbol string) int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	book, ok := e.books[symbol]
+	if !ok {
+		return 0
+	}
+	book.mu.RLock()
+	defer book.mu.RUnlock()
+	return len(book.bids) + len(book.asks)
+}
+
 func orderIDForSide(side domain.Side, incoming, resting *domain.Order) domain.OrderID {
 	if incoming.Side == side {
 		return incoming.ID

@@ -11,6 +11,7 @@ import (
 	"github.com/AlexPips/order-engine/internal/events"
 	"github.com/AlexPips/order-engine/internal/matching"
 	"github.com/AlexPips/order-engine/internal/repository"
+	"github.com/AlexPips/order-engine/internal/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 	"google.golang.org/grpc"
@@ -20,21 +21,23 @@ import (
 
 type OrderService struct {
 	orderpb.UnimplementedOrderServiceServer
-	engine *matching.Engine
-	bus    *events.Bus
-	repo   *repository.Queries
-	pool   *pgxpool.Pool
-	mu     sync.RWMutex
-	orders map[domain.OrderID]*domain.Order
+	engine  *matching.Engine
+	bus     *events.Bus
+	repo    *repository.Queries
+	pool    *pgxpool.Pool
+	metrics *telemetry.Metrics
+	mu      sync.RWMutex
+	orders  map[domain.OrderID]*domain.Order
 }
 
-func NewOrderService(engine *matching.Engine, bus *events.Bus, repo *repository.Queries, pool *pgxpool.Pool) *OrderService {
+func NewOrderService(engine *matching.Engine, bus *events.Bus, repo *repository.Queries, pool *pgxpool.Pool, metrics *telemetry.Metrics) *OrderService {
 	return &OrderService{
-		engine: engine,
-		bus:    bus,
-		repo:   repo,
-		pool:   pool,
-		orders: make(map[domain.OrderID]*domain.Order),
+		engine:  engine,
+		bus:     bus,
+		repo:    repo,
+		pool:    pool,
+		metrics: metrics,
+		orders:  make(map[domain.OrderID]*domain.Order),
 	}
 }
 
@@ -128,9 +131,16 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *orderpb.CreateOrder
 		MaxSlippageBPS: req.GetMaxSlippageBps(),
 	}
 
+	s.metrics.OrdersReceived.Inc()
+	start := time.Now()
 	trades, err := s.engine.SubmitOrder(ctx, &o)
+	s.metrics.OrderLatency.Observe(time.Since(start).Seconds())
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
+	}
+	s.metrics.OrdersSubmitted.Inc()
+	if len(trades) > 0 {
+		s.metrics.TradesExecuted.Add(float64(len(trades)))
 	}
 
 	s.mu.Lock()
