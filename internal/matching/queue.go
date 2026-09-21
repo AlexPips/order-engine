@@ -12,24 +12,6 @@ var (
 	ErrDuplicateOrder = errors.New("order already exists")
 )
 
-func (ob *OrderBook) insertOrder(o *domain.Order) error {
-	if o.Type != domain.OrderTypeLimit {
-		return nil
-	}
-	ob.mu.Lock()
-	defer ob.mu.Unlock()
-	if _, exists := ob.orders[o.ID]; exists {
-		return ErrDuplicateOrder
-	}
-	ob.orders[o.ID] = o
-	if o.Side == domain.SideBuy {
-		ob.bids = insertIntoLevel(ob.bids, o)
-	} else {
-		ob.asks = insertIntoLevel(ob.asks, o)
-	}
-	return nil
-}
-
 func insertIntoLevel(levels []PriceLevel, o *domain.Order) []PriceLevel {
 	// Binary search finds insertion index in one pass (O(log n)).
 	// Bids are sorted high→low, asks low→high.
@@ -60,22 +42,44 @@ func insertIntoLevel(levels []PriceLevel, o *domain.Order) []PriceLevel {
 	return levels
 }
 
+// bestBid returns the best bid. Caller must hold book.mu.
 func (ob *OrderBook) bestBid() *domain.Order {
-	ob.mu.RLock()
-	defer ob.mu.RUnlock()
 	if len(ob.bids) == 0 || len(ob.bids[0].Orders) == 0 {
 		return nil
 	}
 	return &ob.bids[0].Orders[0]
 }
 
+// bestAsk returns the best ask. Caller must hold book.mu.
 func (ob *OrderBook) bestAsk() *domain.Order {
-	ob.mu.RLock()
-	defer ob.mu.RUnlock()
 	if len(ob.asks) == 0 || len(ob.asks[0].Orders) == 0 {
 		return nil
 	}
 	return &ob.asks[0].Orders[0]
+}
+
+// insertOrderLocked inserts an order. Caller must hold book.mu.
+// Market orders are not resting orders, so they are not inserted.
+func (ob *OrderBook) insertOrderLocked(o *domain.Order) error {
+	if o.Type != domain.OrderTypeLimit {
+		return nil
+	}
+	if _, exists := ob.orders[o.ID]; exists {
+		return ErrDuplicateOrder
+	}
+	ob.orders[o.ID] = o
+	if o.Side == domain.SideBuy {
+		ob.bids = insertIntoLevel(ob.bids, o)
+	} else {
+		ob.asks = insertIntoLevel(ob.asks, o)
+	}
+	return nil
+}
+
+// pruneEmptyLevelsLocked removes empty price levels. Caller must hold book.mu.
+func (ob *OrderBook) pruneEmptyLevelsLocked() {
+	ob.bids = pruneLevels(ob.bids)
+	ob.asks = pruneLevels(ob.asks)
 }
 
 func (ob *OrderBook) snapshot() OrderBookSnapshot {
@@ -109,11 +113,6 @@ func (ob *OrderBook) snapshot() OrderBookSnapshot {
 	}
 
 	return OrderBookSnapshot{Bids: bids, Asks: asks}
-}
-
-func (ob *OrderBook) pruneEmptyLevels() {
-	ob.bids = pruneLevels(ob.bids)
-	ob.asks = pruneLevels(ob.asks)
 }
 
 func pruneLevels(levels []PriceLevel) []PriceLevel {

@@ -33,7 +33,7 @@ Trading systems need sub-millisecond order matching — DB round-trips add 1-10m
 
 | Layer | Choice |
 |---|---|
-| **Language** | Go 1.26 |
+| **Language** | Go 1.27.1 |
 | **RPC** | gRPC (unary + server/client/bidi streaming) |
 | **Proto** | buf (lint + breaking-change detection) |
 | **DB** | PostgreSQL 16 + sqlc (type-safe queries) |
@@ -48,6 +48,7 @@ Trading systems need sub-millisecond order matching — DB round-trips add 1-10m
 - **Self-trade prevention** — MiFID II compliance in `fillOrdersAtLevel`.
 - **Market slippage protection** — `max_slippage_bps` caps fills.
 - **Idempotent creation** — `idempotency_key` prevents duplicates.
+- **Per-book mutex** — serializes matching per symbol, no data races under concurrent load.
 
 ## Benchmarks
 
@@ -97,6 +98,7 @@ grpcurl -plaintext -d '{
 - State recovery on restart (replay open orders from DB)
 - mTLS-ready
 - Fuzz tests + integration tests (testcontainers-go)
+- Race-tested concurrent submissions (50 goroutines × 20 orders)
 
 ## Tech reference
 

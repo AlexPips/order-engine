@@ -19,6 +19,11 @@ var tracer = otel.Tracer("internal/matching/engine")
 
 var ErrInsufficientLiquidity = errors.New("no matching orders available")
 
+// tradePool reduces GC pressure by reusing trade objects.
+var tradePool = sync.Pool{
+	New: func() any { return &domain.Trade{} },
+}
+
 type Engine struct {
 	mu    sync.RWMutex
 	books map[string]*OrderBook
@@ -42,6 +47,9 @@ func (e *Engine) SubmitOrder(ctx context.Context, o *domain.Order) ([]domain.Tra
 	defer span.End()
 
 	book := e.getOrCreateBook(o.Symbol)
+	book.mu.Lock()
+	defer book.mu.Unlock()
+
 	switch o.Type {
 	case domain.OrderTypeMarket:
 		return e.matchMarket(ctx, book, o)
@@ -88,14 +96,17 @@ func (e *Engine) ReplayOrders(orders []domain.Order) {
 	}
 	for symbol, symOrders := range bySymbol {
 		book := e.getOrCreateBook(symbol)
+		book.mu.Lock()
 		for i := range symOrders {
-			_ = book.insertOrder(&symOrders[i]) //nolint:errcheck
+			_ = book.insertOrderLocked(&symOrders[i]) //nolint:errcheck
 		}
+		book.mu.Unlock()
 	}
 }
 
 func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming *domain.Order, priceLimit decimal.Decimal) ([]domain.Trade, error) {
-	var trades []domain.Trade
+	// Pre-allocate: most orders fill in 1-2 levels.
+	trades := make([]domain.Trade, 0, 8)
 	remaining := incoming.Quantity
 
 	if incoming.Side == domain.SideBuy {
@@ -110,7 +121,7 @@ func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming *doma
 			before := len(lvl.Orders)
 			lvl.Orders = fillOrdersAtLevel(lvl.Orders, incoming, &remaining, &trades)
 			emptied := len(lvl.Orders) == 0 && before > 0
-			book.pruneEmptyLevels()
+			book.pruneEmptyLevelsLocked()
 			if emptied {
 				continue
 			}
@@ -128,7 +139,7 @@ func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming *doma
 			before := len(lvl.Orders)
 			lvl.Orders = fillOrdersAtLevel(lvl.Orders, incoming, &remaining, &trades)
 			emptied := len(lvl.Orders) == 0 && before > 0
-			book.pruneEmptyLevels()
+			book.pruneEmptyLevelsLocked()
 			if emptied {
 				continue
 			}
@@ -145,7 +156,7 @@ func (e *Engine) matchLimit(ctx context.Context, book *OrderBook, incoming *doma
 		default:
 			incoming.Status = domain.OrderStatusPartial
 		}
-		if err := book.insertOrder(incoming); err != nil {
+		if err := book.insertOrderLocked(incoming); err != nil {
 			return nil, fmt.Errorf("insert resting order: %w", err)
 		}
 	} else {

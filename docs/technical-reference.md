@@ -81,7 +81,7 @@ order-engine/
 │   ├── matching/
 │   │   ├── engine.go            # Engine: SubmitOrder entry point, matchLimit/matchMarket
 │   │   ├── types.go             # OrderBook, PriceLevel, OrderBookSnapshot
-│   │   ├── queue.go             # OrderBook.insertOrder, snapshot, prune, bestBid/bestAsk
+│   │   ├── queue.go             # OrderBook.insertOrderLocked, snapshot, prune, bestBid/bestAsk
 │   │   ├── engine_test.go       # Unit tests for matching logic
 │   │   ├── bench_test.go        # Quick benchmarks
 │   │   ├── benchmark_test.go    # Comprehensive benchmarks

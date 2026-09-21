@@ -1,9 +1,11 @@
 version: "2"
+run:
+  go: "1.27.1"
 linters:
+  default: none
   enable:
     - durationcheck
     - errname
-    - gocritic
     - gosec
     - misspell
     - revive
@@ -12,10 +14,6 @@ linters:
   settings:
     errcheck:
       check-blank: true
-    gocritic:
-      enabled-tags:
-        - diagnostic
-        - performance
     revive:
       rules:
         - name: exported

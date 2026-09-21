@@ -2,6 +2,8 @@ package matching
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/AlexPips/order-engine/internal/domain"
@@ -343,5 +345,61 @@ func TestMarketOrderNoSlippageLimit(t *testing.T) {
 	}
 	if totalFilled.String() != "3" {
 		t.Fatalf("expected all 3 levels filled (no slippage limit), got %s", totalFilled)
+	}
+}
+
+// TestConcurrentSubmit verifies that concurrent order submissions on the same
+// symbol do not corrupt the order book. This test would have caught the
+// data race in matchLimit where book.bids/book.asks were mutated without
+// holding book.mu.
+func TestConcurrentSubmit(t *testing.T) {
+	eng := New()
+	ctx := context.Background()
+	const numGoroutines = 50
+	const ordersPerGoroutine = 20
+
+	// Pre-populate with sell orders so buys will match.
+	for i := 0; i < 100; i++ {
+		o := domain.Order{
+			ID:       domain.OrderID(fmt.Sprintf("rest-sell-%d", i)),
+			UserID:   "maker",
+			Symbol:   "BTCUSD",
+			Side:     domain.SideSell,
+			Type:     domain.OrderTypeLimit,
+			Price:    decimal.NewFromFloat(50000 + float64(i%10)*100),
+			Quantity: decimal.NewFromFloat(1),
+			Status:   domain.OrderStatusNew,
+		}
+		if _, err := eng.SubmitOrder(ctx, &o); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for g := 0; g < numGoroutines; g++ {
+		wg.Add(1)
+		go func(goroutineID int) {
+			defer wg.Done()
+			for i := 0; i < ordersPerGoroutine; i++ {
+				o := domain.Order{
+					ID:       domain.OrderID(fmt.Sprintf("concurrent-%d-%d", goroutineID, i)),
+					UserID:   domain.UserID(fmt.Sprintf("user-%d", goroutineID)),
+					Symbol:   "BTCUSD",
+					Side:     domain.SideBuy,
+					Type:     domain.OrderTypeLimit,
+					Price:    decimal.NewFromFloat(51000),
+					Quantity: decimal.NewFromFloat(0.5),
+					Status:   domain.OrderStatusNew,
+				}
+				_, _ = eng.SubmitOrder(ctx, &o)
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	// Verify book integrity: no panic, no corrupted state.
+	snap := eng.GetOrderBook("BTCUSD")
+	if len(snap.Bids) == 0 && len(snap.Asks) == 0 {
+		t.Error("expected non-empty book after concurrent submissions")
 	}
 }
